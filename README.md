@@ -6,7 +6,7 @@ Provision a private OCI Kubernetes environment for CPU RDMA workloads, then conf
 
 ## 1. Prepare
 
-Have your OCI compartment, region/availability domain, SSH key pair and required [IAM permissions](docs/IAM.md) ready. Choose approved worker and operator images and start with **two workers** for cross-node testing. Provisioned resources incur OCI charges.
+Have your OCI compartment, region/availability domain, SSH key pair and required [IAM permissions](docs/IAM.md) ready. [Import an Ubuntu 24.04 or 22.04 HPC worker image](docs/CUSTOM-IMAGES.md) and select an approved operator image and start with **two workers** for cross-node testing. Provisioned resources incur OCI charges.
 
 ## 2. Build the Resource Manager ZIP
 
@@ -57,4 +57,3 @@ In **Setup & validation**, save the image digest and RDMA settings, check hosts,
 
 Follow the [UI guide](README-UI.md) or [operator VM guide](README-OPERATOR-VM.md) for these operations. If a step fails, start with [troubleshooting](docs/TROUBLESHOOTING.md).
 
-Keep generated ZIPs out of GitHub. Rebuild the ORM ZIP after project changes before deploying.

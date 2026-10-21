@@ -1,5 +1,7 @@
 # Deployment reference
 
+For Ubuntu HPC download links and custom-image import steps, see [Create the worker image](CUSTOM-IMAGES.md).
+
 For the complete first-time walkthrough, start with [README](../README.md). This page explains prerequisites and the restricted-access route.
 
 ## Worker and network prerequisites

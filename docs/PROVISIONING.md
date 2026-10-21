@@ -1,5 +1,7 @@
 # Provisioning reference
 
+For Ubuntu HPC download links and custom-image import steps, see [Create the worker image](CUSTOM-IMAGES.md).
+
 Use the [main README](../README.md) for the quick route and ORM build commands. Consult this reference for field explanations and detailed connection steps.
 
 ## Words you will see
