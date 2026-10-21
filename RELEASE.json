@@ -5,8 +5,5 @@
   "helm": "v3.19.0",
   "deployment_guide": "docs/DEPLOYMENT.md",
   "runtime_dependencies": "checksum-verified bootstrap downloads",
-  "orm_build_budget_bytes": 10000000,
-  "payload_sha256": "eb7aecd46d583adf49370782cf5c7146c0df63a0768f603adb389a0e0d96e2fc",
-  "orm_sha256": "4a276ac0eb42e4f551cdcd64d44048aedb8996dbf63709e33a0fd544228bcdc8",
-  "orm_bytes": 202061
+  "orm_build_budget_bytes": 10000000
 }
