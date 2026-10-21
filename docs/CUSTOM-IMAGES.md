@@ -11,8 +11,6 @@ These are **CPU HPC images (no GPU)** for workers. The operator uses its separat
 | Ubuntu 24.04 HPC (no GPU) | [Download .oci image](https://idxzjcdglx2s.objectstorage.eu-frankfurt-1.oci.customer-oci.com/p/ZPwaXxeidz3BPrdzEQt_9r-CnrWWOUR_DQ7sB60j3-lqq5bXhLL0LF43J-QYGaua/n/idxzjcdglx2s/b/oci-hpc-image-builds/o/images/2026.07.16/Canonical-Ubuntu-24.04-2026.02.28-0-KERNEL-ORACLE-6.8-DOCA-OFED-3.3.0-2026.07.16-0.oci) | `ubuntu-noble` |
 | Ubuntu 22.04 HPC (no GPU) | [Download .oci image](https://idxzjcdglx2s.objectstorage.eu-frankfurt-1.oci.customer-oci.com/p/ZPwaXxeidz3BPrdzEQt_9r-CnrWWOUR_DQ7sB60j3-lqq5bXhLL0LF43J-QYGaua/n/idxzjcdglx2s/b/oci-hpc-image-builds/o/images/2026.07.16/Canonical-Ubuntu-22.04-2026.02.28-0-KERNEL-ORACLE-6.8-DOCA-OFED-3.3.0-2026.07.16-0.oci) | `ubuntu-jammy` |
 
-The filenames identify the build as **2026.07.16**, with **Oracle kernel 6.8** and **DOCA OFED 3.3.0**. Choose the release compatible with your selected OKE version. The links above were supplied for this project; image contents and download availability have not been independently verified here.
-
 You can copy a link directly into OCI's import form; downloading the file to your laptop first is optional. These are pre-authenticated Object Storage links. Anyone with a link can access its target while it remains valid; an expired or revoked link requires a replacement from the image owner.
 
 ## 2. Import into OCI
