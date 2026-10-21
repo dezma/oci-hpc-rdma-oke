@@ -27,6 +27,8 @@ class FakeProvider(LiveProvider):
         return [{'metadata':{'name':f'worker-{n}','uid':f'u{n}','labels':{'oci-rdma':'true','oke-rdma-mode':'dranet'}},
                  'status':{'addresses':[{'type':'InternalIP','address':f'10.0.1.{n}'}],'nodeInfo':{'bootID':'boot1'},'conditions':[{'type':'Ready','status':'True'}]}} for n in range(1,self.size+1)]
     def oci(self,args,**kwargs):
+        if args[:3]==['ce','work-request','list']:
+            return subprocess.CompletedProcess(args,0,json.dumps({'data':getattr(self,'work_requests',[])}),'')
         if args[:3]==['compute','compute-capacity-report','create']:
             return subprocess.CompletedProcess(args,0,json.dumps({'data':{'availability-domain':'AD1','shape-availabilities':[{'instance-shape':'BM.Optimized3.36','availability-status':'AVAILABLE','available-count':None}]}}),'')
         assert args[:3]==['ce','node-pool','get'], 'Direct OKE writes are forbidden'
@@ -181,7 +183,7 @@ def test_failed_apply_close_does_not_rollback_or_alter_stack(cap):
     writes=deepcopy(cap.gateway.writes)
     result=cap.close(op['operation_id'])
     assert result['status']=='passed' and cap.gateway.writes==writes
-    assert cap.operation()['phase']=='COMPLETE'
+    assert cap.operation()['phase']=='CLOSED_FAILED'
 
 
 def test_connection_checks_stack_ownership_before_saving(cap,monkeypatch):

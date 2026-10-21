@@ -94,3 +94,7 @@ Use the actual configured PF if it differs. On snap-based Ubuntu images, a missi
 | Same hardware serial/MAC after replacement | OCI may reuse a physical host. Keep identity evidence and verify actual health; new instance OCID alone does not prove new hardware. |
 
 Read [capacity](CAPACITY.md) and [replacement](REPLACEMENT.md) before taking recovery actions. If blocked, retain evidence and resolve the cause rather than bypassing the guard.
+
+## Failed scale-up left some workers provisioned
+
+If requested size is 6 but only 5 workers exist, do not assume the failed Apply rolled back. Use [capacity reconciliation](CAPACITY.md#reconcile-partially-provisioned-capacity). Acknowledge the terminal failed Apply, then review a fresh plan to a target at or below the surviving count. If work requests are still active, wait. If surviving workers are not Ready, resolve their health first. Do not delete operation journals or remove Terraform state to unlock scaling.

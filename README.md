@@ -13,7 +13,7 @@ Have your OCI compartment, region/availability domain, SSH key pair and required
 On Linux or WSL, install Git, Python 3, Bash, `curl`, `tar` and `sha256sum`. Replace the repository URL below, then run:
 
 ```bash
-git clone https://github.com/YOUR-ACCOUNT/YOUR-REPOSITORY.git
+git clone https://github.com/dezma/oci-hpc-rdma-oke.git
 cd YOUR-REPOSITORY
 chmod +x provisioning/*.sh control/bootstrap/*.sh
 bash provisioning/build-orm.sh
@@ -55,5 +55,5 @@ On the **operator VM**, follow [image and registry setup](docs/IMAGE-PULL-SECRET
 
 In **Setup & validation**, save the image digest and RDMA settings, check hosts, enable Dranet, and run the quick cross-node test. Once validation passes, download the workload YAML and use it to deploy your workload.
 
-Follow the [UI guide](README-UI.md) or [operator VM guide](README-OPERATOR-VM.md) for these operations. If a step fails, start with [troubleshooting](docs/TROUBLESHOOTING.md).
+Follow the [UI guide](docs/UI.md) or [operator VM guide](docs/OPERATOR-VM.md)) for these operations. If a step fails, start with [troubleshooting](docs/TROUBLESHOOTING.md).
 

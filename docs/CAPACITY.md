@@ -104,7 +104,7 @@ The tool waits for the requested pool size and Kubernetes readiness, then checks
 
 If Terraform applies successfully but workers or RDMA devices are still initializing, **Resume recorded operation** continues monitoring and verification. OCI job IDs and submission phases are persisted before and after remote calls. A worker interruption or lost API response never causes an apply to be silently resubmitted. When submission outcome is uncertain, resume searches for the unique recorded operation; if it cannot identify a single job, inspect Resource Manager before taking further action.
 
-An apply that has been submitted cannot be discarded. A terminal failed/canceled apply can be explicitly acknowledged using **Close failed apply** after inspecting its OCI job. This releases the local operation lock without changing infrastructure or stack variables. Review actual capacity and the stack target before generating a new reconciliation plan. A successful infrastructure apply with failed host readiness is reported as needing attention; the tool does not automatically roll infrastructure back.
+An apply that has been submitted cannot be discarded. A terminal failed/canceled apply can be explicitly acknowledged using **Acknowledge failed apply** after inspecting its OCI job. This releases the local operation lock without changing infrastructure or stack variables. Review actual capacity and the stack target before generating a new reconciliation plan. A successful infrastructure apply with failed host readiness is reported as needing attention; the tool does not automatically roll infrastructure back.
 
 The UI refreshes observed capacity on request and during operations. Operation history retains the reviewed counts, plan hash, OCI job IDs, progress, and host reports. Source-controlled variable files should reflect the intended node count when moving the same deployment to a different Terraform execution workflow.
 
@@ -149,3 +149,22 @@ Select an approved operator image name under Advanced operator VM → Approved o
 After scale-out, run pair tests or a matrix covering the new workers. The timing panel shows observed provisioning/readiness stages and time until successful validation covers the new identities. Missing timings remain unknown. See [performance](PERFORMANCE.md).
 
 Use [worker replacement](REPLACEMENT.md) for deliberate replacement of one defective worker while retaining the intended count.
+
+
+## Reconcile partially provisioned capacity
+
+A failed Apply can leave real infrastructure changes. For example, a request from 3 to 6 may create two additional workers, leaving requested size 6 and provisioned count 5. Acknowledgement does not undo those workers and is not a successful scale operation.
+
+1. Inspect the failed Resource Manager Apply and OKE work requests. Wait for all related work to become terminal.
+2. Select **Acknowledge failed apply** if the operation is still pending. The operation remains labelled as a failed Apply, with observed counts retained.
+3. Review current requested, OCI provisioned (ACTIVE), Kubernetes registered, Ready and RDMA-ready counts. These measure different stages.
+4. Stop application controllers and release RDMA claims/templates. Corrective scale-down retains the normal workload and drain checks even when the target equals the number of provisioned workers.
+5. Enter a target at or below the provisioned count, such as 5 to align the request or 3 to shrink the pool. Select **Check capacity and scaling prerequisites**, then **Generate reconciliation plan**.
+6. Review the fresh size-only plan. The Terraform change is requested size 6 → 5 (or 3), not a guarantee about which individual workers OKE retains. Reject unrelated image, network or replacement changes.
+7. Apply the reviewed plan and wait for current capacity/readiness checks. Revalidate RDMA on the surviving workers.
+
+Reconciliation permits a requested/observed mismatch only for a terminal failed/canceled Apply on the owning stack, no active OKE work, matching surviving ACTIVE OCI and Ready/schedulable Kubernetes workers, and an ACTIVE or NEEDS_ATTENTION pool. Unknown lifecycle states, unmatched or unready workers, workload/claim blockers, unsafe eviction settings and inventory changes after planning still block it. A target above the surviving count is not this recovery path. Capacity reports are not required for a reduction, but they remain required for ordinary scale-up.
+
+No rollback, automatic retry or direct node deletion is performed. An unavailable work-request read blocks safely; the operator requires `read cluster-work-requests` in the pool compartment. Older acknowledged-failure records are displayed as failed acknowledgements without rewriting their stored history.
+
+See [testing on an existing operator](TESTING-CAPACITY.md).

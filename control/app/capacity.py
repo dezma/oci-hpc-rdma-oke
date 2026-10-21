@@ -13,7 +13,7 @@ import secrets
 import time
 from .provider_base import ProviderError, ActionError
 
-TERMINAL = {'COMPLETE', 'DISCARDED'}
+TERMINAL = {'COMPLETE', 'DISCARDED', 'CLOSED_FAILED'}
 JOB_TERMINAL = {'SUCCEEDED', 'FAILED', 'CANCELED'}
 STACK_PATTERN = r'^ocid1[.]ormstack[.][A-Za-z0-9._-]+$'
 POOL_ADDRESS = 'oci_containerengine_node_pool.rdma'
@@ -212,7 +212,13 @@ class Capacity:
         if self._gateway is None: self._gateway = ORMGateway(self.s.region)
         return self._gateway
 
-    def operation(self): return json.loads(self.journal.read_text()) if self.journal.exists() else None
+    def operation(self):
+        op = json.loads(self.journal.read_text()) if self.journal.exists() else None
+        # Interpret older acknowledgements honestly without modifying retained evidence.
+        if op and op.get('phase') == 'COMPLETE' and op.get('readiness') == 'not_verified' and op.get('apply_job_id') and 'actual_size' in op:
+            op = {**op, 'phase': 'CLOSED_FAILED', 'outcome': 'failed', 'legacy_acknowledgement': True}
+            op.pop('actual_size', None)  # This field contained desired size, not observed capacity.
+        return op
     def save(self, op):
         op['updated_at'] = time.time()
         timeline = op.setdefault('timeline', [])
@@ -285,16 +291,59 @@ class Capacity:
         ips = {n.get('private_ip') for n in pool.get('nodes', []) if n['id'] in ids}
         return [n for n in self.p._rdma_nodes() if self.p._node_instance_id(n) in ids or self.p._node_internal_ip(n) in ips or n['metadata']['name'] in ips]
 
+    def snapshot(self, pool):
+        from .provider import ready
+        nodes = self.members(pool)
+        active = [n for n in pool.get('nodes', []) if n.get('lifecycle_state') == 'ACTIVE']
+        return {'checked_at': time.time(), 'requested': pool['node_config_details']['size'],
+                'provisioned': len(active), 'registered': len(nodes), 'ready': sum(ready(n) for n in nodes),
+                'instance_ids': sorted(n['id'] for n in active),
+                'node_uids': sorted(n['metadata']['uid'] for n in nodes)}
+
+    def no_active_oke(self, pool):
+        r = self.p.oci(['ce', 'work-request', 'list', '--compartment-id', pool['compartment_id'],
+                        '--resource-id', self.s.node_pool_id, '--resource-type', 'NODEPOOL', '--all'],
+                       check=False, timeout=35)
+        try:
+            if r.returncode: raise ValueError()
+            rows = json.loads(r.stdout)['data']
+            if not isinstance(rows, list): raise ValueError()
+            if any(w.get('status') not in JOB_TERMINAL for w in rows):
+                raise ProviderError('An OKE node-pool work request is active or has unknown status. Wait for it to finish before reconciliation or scaling.')
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError('Cannot verify OKE work requests. Check read cluster-work-requests permission and retry; no capacity change was submitted.') from None
+        unsettled = [n for n in pool.get('nodes', []) if n.get('lifecycle_state') not in {'ACTIVE', 'FAILED', 'DELETED'}]
+        if unsettled:
+            raise ProviderError('OCI workers are still changing or have unknown lifecycle state. Wait for provisioning or termination to settle.')
+
+    def partial_reconciliation(self, pool, target, nodes):
+        requested = pool['node_config_details']['size']
+        active = [n for n in pool.get('nodes', []) if n.get('lifecycle_state') == 'ACTIVE']
+        if not (target < requested and target <= len(active) < requested):
+            return False
+        jobs = self.no_active(self.stack_id())
+        last_apply = next((j for j in jobs if j.get('operation') == 'APPLY'), None)
+        if not last_apply or last_apply.get('stack_id') != self.stack_id() or last_apply.get('lifecycle_state') not in {'FAILED', 'CANCELED'}:
+            raise ProviderError('A partial pool can be reconciled only after a recorded terminal failed/canceled Apply. Review Resource Manager first.')
+        active_ids = {n['id'] for n in active}
+        active_ips = {n.get('private_ip') for n in active if n.get('private_ip')}
+        if len(nodes) != len(active) or any(self.p._node_instance_id(n) not in active_ids and self.p._node_internal_ip(n) not in active_ips for n in nodes):
+            raise ProviderError('Active OCI workers and registered Kubernetes workers do not match. Resolve inventory before reconciliation.')
+        return True
+
     def checks(self, pool, target):
         from .provider import ready
         if type(target) is not int or not 0 <= target <= 64: raise ProviderError('Target node count must be between 0 and 64.')
         before = pool['node_config_details']['size']
         nodes = self.members(pool)
-        if len(nodes) != before or any(not ready(n) or n.get('spec', {}).get('unschedulable') for n in nodes):
+        self.no_active_oke(pool)
+        reconcile = self.partial_reconciliation(pool, target, nodes)
+        if (len(nodes) != before and not reconcile) or any(not ready(n) or n.get('spec', {}).get('unschedulable') for n in nodes):
             raise ProviderError('Wait for all current pool workers to be Ready and schedulable before scaling.')
         if pool.get('node_pool_cycling_details', {}).get('is_node_cycling_enabled') is True:
             raise ProviderError('Node cycling is enabled. OCI Terraform provider 9.9 sends this flag with node-pool updates, including a size change. Set is_node_cycling_enabled=false in the existing stack and review/apply that baseline at the current node count before scaling.')
-        if pool.get('lifecycle_state') != 'ACTIVE': raise ProviderError('The managed pool is not ACTIVE.')
+        if pool.get('lifecycle_state') != 'ACTIVE' and not (reconcile and pool.get('lifecycle_state') == 'NEEDS_ATTENTION'):
+            raise ProviderError('The managed pool is not ACTIVE or eligible for partial-capacity reconciliation.')
         inv = self.p.inventory()
         if target > before:
             names = {x['metadata']['name'] for x in nodes}
@@ -401,6 +450,8 @@ class Capacity:
             from .provider import ready
             members = self.members(pool)
             data.update(desired=pool['node_config_details']['size'], observed=len(members), ready=sum(ready(n) for n in members), pool_members=[n['metadata']['name'] for n in members])
+            data['counts'] = self.snapshot(pool)
+            data['reconciliation_needed'] = data['counts']['requested'] != data['counts']['provisioned']
             data['workers'] = [{'instance_id': n.get('id'), 'address': n.get('private_ip', ''), 'lifecycle_state': n.get('lifecycle_state', 'UNKNOWN')} for n in pool.get('nodes', []) if n.get('lifecycle_state') != 'DELETED']
         except ProviderError as exc: data['error'] = str(exc)
         from .performance import capacity_timing
@@ -419,8 +470,14 @@ class Capacity:
             self.p.report_progress('Resource Manager ' + kind.lower(), 1 if kind == 'PLAN' else 2, 5, 'OCI job: ' + str(state))
             if state in JOB_TERMINAL:
                 if state != 'SUCCEEDED':
-                    op['phase'] = kind+'_FAILED'; self.save(op)
-                    raise ProviderError('Resource Manager job '+str(state)+'. Inspect its OCI job before continuing.')
+                    op['phase'] = kind+'_FAILED'
+                    if kind == 'APPLY':
+                        op.update(outcome='failed', apply_state=state, readiness='not_verified')
+                        op.setdefault('milestones', {})['apply_finished_observed_at'] = time.time()
+                        try: op['observed_capacity'] = self.snapshot(self.pool())
+                        except ProviderError as exc: op['observation_error'] = str(exc)
+                    self.save(op)
+                    raise ProviderError('Resource Manager job '+str(state)+'. Infrastructure may have changed; no rollback is implied. Inspect observed capacity and acknowledge the failed Apply before a fresh reconciliation plan.')
                 return job
             if time.monotonic() >= deadline: raise ProviderError('OCI job is still active. Use Resume to monitor the recorded job; do not submit another apply.')
             time.sleep(10)
@@ -460,7 +517,7 @@ class Capacity:
         planned = {**stack,'variables':variables}
         op = {'operation_id':secrets.token_hex(32),'phase':'UPDATING_VARIABLES', 'stack_id':sid,
               'cluster_id':self.s.cluster_id,'node_pool_id':self.s.node_pool_id,
-              'capacity_report':report,'before':before,'target':target,'original_node_count':original,'base_fingerprint':stack_fingerprint(stack),
+              'before_observed':self.snapshot(pool),'reconciliation':len(nodes)!=before,'capacity_report':report,'before':before,'target':target,'original_node_count':original,'base_fingerprint':stack_fingerprint(stack),
               'planned_fingerprint':stack_fingerprint(planned),'created_at':time.time(),
               'before_node_uids':[n['metadata']['uid'] for n in nodes], 'before_node_boots':{n['metadata']['uid']:n.get('status',{}).get('nodeInfo',{}).get('bootID') for n in nodes}, 'plan_job_id':'', 'apply_job_id':''}
         self.save(op)
@@ -496,6 +553,10 @@ class Capacity:
         pool=self.pool()
         if pool['node_config_details']['size'] != op['before']: raise ProviderError('Actual capacity changed after planning.')
         self.checks(pool,op['target'])
+        if op.get('reconciliation'):
+            now = self.snapshot(pool)
+            if any(now[k] != op['before_observed'][k] for k in ('requested', 'instance_ids', 'node_uids')):
+                raise ProviderError('Observed workers changed after reconciliation planning. Discard and generate a fresh plan.')
         op['apply_capacity_report'] = self.capacity_report(pool, op['target'])
         self.save(op)
         self.require_capacity_report(op['apply_capacity_report'])
@@ -596,6 +657,8 @@ class Capacity:
         if job.get('stack_id') != op['stack_id'] or job.get('operation') != 'APPLY' or job.get('lifecycle_state') not in {'FAILED','CANCELED'}:
             raise ProviderError('The recorded apply is not a terminal failed or canceled job.')
         pool = self.pool()
-        op.update(phase='COMPLETE', readiness='not_verified', actual_size=pool['node_config_details']['size'])
+        self.no_active_oke(pool)
+        op.pop('actual_size', None)
+        op.update(phase='CLOSED_FAILED', outcome='failed', readiness='not_verified', observed_capacity=self.snapshot(pool))
         self.save(op)
-        return {'status':'passed', 'capacity':op, 'message':'Failed OCI apply acknowledged. No infrastructure or stack variables were changed. Review actual capacity and create a new plan to reconcile the target.'}
+        return {'status':'passed', 'capacity':op, 'message':'Failed Apply acknowledged; its infrastructure changes were not rolled back. This acknowledgement submits no infrastructure change. Review requested, provisioned and registered counts, then generate a fresh reconciliation plan.'}

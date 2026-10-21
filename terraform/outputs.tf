@@ -87,7 +87,7 @@ output "operator_diagnostics_command" {
 
 output "operator_ui_token" {
   value       = random_password.operator_ui_token.result
-  description = "Single-operator bootstrap token for the private control-center UI. Replace this model with enterprise OIDC before broad multi-user deployment."
+  description = "Login token for the Control Center UI."
   sensitive   = true
 }
 

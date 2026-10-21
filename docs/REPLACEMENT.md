@@ -1,4 +1,4 @@
-# Replace a defective managed worker — Use replacement when diagnosis points to a persistent worker problem, such as a selected mlx5 PF with no physical link after OCA recovery has been ruled out or has failed. Replacement terminates that exact compute instance. It cannot fix a shared image, network, placement or bootstrap defect; the new worker may have the same symptom.
+# Replace a defective managed worker.
 
 ## Prerequisites and permissions
 
@@ -8,7 +8,7 @@
 - Kubernetes node identity must map to an ACTIVE OCI instance in this managed pool. The tool will not select a destructive target by IP address alone. Kubernetes Ready is not required for preview, but a missing/unidentifiable Kubernetes node requires administrator diagnosis outside this workflow.
 - Stop application controllers targeting the worker and safely remove their workloads first. The tool requires the selected node to be application-idle. Only completed pods and verified kube-system DaemonSets are exempted. All resource claims and claim templates, including pending claims elsewhere in the cluster, block replacement. Do not delete live application claims just to bypass this check.
 - Pause changes made outside this tool, including Resource Manager applies and OKE node cycling. The local lock does not lock the OCI Console or another administrator's session.
-- The operator's existing capacity IAM remains required. adds a pool-scoped `manage cluster-node-pools` statement restricted to `request.operation = 'DeleteNode'`, and compartment-scoped `read cluster-work-requests`. It does not grant an unrestricted delete-node-pool action. The existing instance/network permissions used by managed-pool operations remain necessary.
+- The operator's existing capacity IAM remains required.  It does not grant an unrestricted delete-node-pool action. The existing instance/network permissions used by managed-pool operations remain necessary.
 
 For an existing deployment, regenerate and review the policy files with `provisioning/capacity-policy.py` (also included as `capacity-policy.py` in the application update). Follow `docs/CAPACITY.md` for the complete command and policy installation procedure. This generator writes reviewable JSON; it does not apply IAM changes. Update the existing policy deliberately with your administrator. An application-only update does not install IAM. Read access and preview success do not prove mutation permission; OCI checks it at submission. Do not use the new ORM package merely to change IAM without reviewing its full plan, because its new payload can replace the operator.
 
