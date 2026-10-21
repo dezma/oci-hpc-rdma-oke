@@ -42,12 +42,4 @@ Keep this OCID pinned for subsequent scaling. Review the Terraform Plan before A
 
 Return to [provisioning](../README.md#2-build-the-resource-manager-zip).
 
-## If something fails
 
-| Symptom | Check |
-| --- | --- |
-| URL denied, expired or not found | Copy the full URL without truncation. Ask the image owner for a working link if it was revoked/expired or the object is unavailable. |
-| Import fails or stays pending | Inspect the image import work request for the actual failure; confirm permissions, source access and OCI image format. |
-| Imported image is not found during deployment | Check region, compartment, image state, OCID and the identity's permission to use it. |
-| Shape/image compatibility fails | Verify the image supports the selected shape and AD. Do not bypass the project's compatibility checks. |
-| Worker bootstrap or RDMA readiness fails | Confirm the matching Ubuntu release and OKE version, then follow [host troubleshooting](TROUBLESHOOTING.md). Import success does not verify agent or fabric configuration. |
