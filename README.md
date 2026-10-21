@@ -4,31 +4,58 @@ Deploy a private Kubernetes environment for CPU RDMA workloads on Oracle Cloud I
 
 ![architecture](docs/oci-hpc-arc.png)
 
+**Start here.**This project creates billable infrastructure. Review your organisation's limits, budget and data-retention requirements before Apply
 
-## What is in the package?
+## Get the project and build the ORM ZIP
 
-| Item | Use |
-| --- | --- |
-| Full project ZIP | Source, Terraform, container Dockerfile, complete workload examples and guides |
-| ORM ZIP | Upload this compact ZIP to OCI Resource Manager to deploy; do not upload the outer delivery ZIP |
-| Guides ZIP | Standalone copies of the user and reference guides |
-| SHA256SUMS | Checksums for checking that downloaded files are intact |
+1. Clone your GitHub repository. Replace the example URL with your actual repository URL:
 
-Unzip the full project on your workstation. Its root contains `README.md`, `terraform/`, `control/`, `provisioning/` and `workloads/`. The application version is in `VERSION`.
+```bash
+git clone https://github.com/YOUR-ACCOUNT/YOUR-REPOSITORY.git
+cd YOUR-REPOSITORY
+```
+
+If you downloaded the source ZIP instead, extract it and open a terminal in its project folder. You should see `README.md`, `VERSION`, `terraform/`, `control/`, `provisioning/` and `workloads/`.
+
+2. Check that the required commands are installed:
+
+```bash
+for tool in bash git python3 curl tar sha256sum; do
+  command -v "$tool" || printf 'Missing prerequisite: %s\n' "$tool"
+done
+```
+
+Install any missing prerequisite using your Linux distribution's package manager before continuing.
+
+3. Build the deployment ZIP from the project root. The permission command also handles source files uploaded to GitHub through a browser without executable permissions:
+
+```bash
+chmod +x provisioning/*.sh control/bootstrap/*.sh
+bash provisioning/build-orm.sh
+```
+
+The script verifies pinned vendor downloads, builds the operator application payload, and packages Terraform with `schema.yaml` at the ZIP root. Wait for the script to finish successfully. If downloads fail, check outbound connectivity and retry; do not bypass checksum verification or use an incomplete archive.
+
+4. Locate and verify the generated archive:
+
+```bash
+ls -lh dist/*-orm-*.zip
+(cd dist && sha256sum -c SHA256SUMS)
+```
+
+The filename is `dist/oci-oke-rdma-quickstart-orm-v<VERSION>.zip`, where `<VERSION>` comes from the project's `VERSION` file. The checksum check should report `OK`. If you built on a remote machine, download that ZIP to your workstation for the Console upload.
+
+5. Complete the OCI preparation below, then upload the generated ORM ZIP when creating the Resource Manager stack. Upload the ORM ZIP itself, without extracting or wrapping it in another ZIP. Do not upload the GitHub source ZIP as the stack configuration.
+
+Rebuild the ORM ZIP after changing application, Terraform or bundled documentation files. Keep generated archives and payloads out of GitHub; the repository's `.gitignore` excludes `dist/` and the generated payload directory. All user guides stay in the project; no separate guides archive is required.
 
 
-## The complete first-time route
 
-| Step | Where | Done when |
-| --- | --- | --- |
-| 1. Gather inputs and permissions | OCI Console + administrator | Worksheet and IAM ownership are agreed |
-| 2. Create and apply the stack | OCI Resource Manager | Apply succeeds and stack outputs exist |
-| 3. Open private access | Workstation + Bastion | Operator SSH works and, for UI users, the browser login opens |
-| 4. Build image and create pull secret | Operator VM | Package check passes, image is pushed, digest recorded and both secrets exist |
-| 5. Configure and validate | UI or operator API | Hosts pass, devices are published, quick pair test and cleanup pass |
-| 6. Run workloads and manage workers | UI + operator, or operator alone | Your own workload starts with its claim |
+### If you do not have tenancy administrator access
 
-Use [the UI guide](README-UI.md) for browser operations or [the operator VM guide](README-OPERATOR-VM.md) for terminal operations after step 3. Both use the same [image-build and pull-secret procedure](docs/IMAGE-PULL-SECRET.md).
+Ask your administrator to provide the required operator dynamic group and any policies you cannot create. In the Resource Manager form, select the corresponding reuse options and supply the existing group OCID. Disable policy creation only when the correct equivalent access exists. See [IAM setup](docs/IAM.md).
+
+Capacity reports use the managed node pool's **compartment**, and the operator can use compartment-scoped report permission. Other deployment and Terraform discovery operations can still require separately granted access. Your personal permissions, Resource Manager job permissions and the operator's instance-principal permissions are separate.
 
 ## 1. Gather your inputs
 
@@ -51,12 +78,6 @@ In OCI Console, select the intended region. Use Console search to find **Compart
 | IAM ownership | Which group/policies already exist and which the stack is permitted to create |
 
 Keep private keys, auth tokens and the UI admin token out of shared worksheets and support bundles. OCIDs and resource names identify resources; they are not substitutes for credentials.
-
-### If you do not have tenancy administrator access
-
-Ask your administrator to provide the required operator dynamic group and any policies you cannot create. In the Resource Manager form, select the corresponding reuse options and supply the existing group OCID. Disable policy creation only when the correct equivalent access exists. See [IAM setup](docs/IAM.md).
-
-Capacity reports use the managed node pool's **compartment**, and the operator can use compartment-scoped report permission. Other deployment and Terraform discovery operations can still require separately granted access. Your personal permissions, Resource Manager job permissions and the operator's instance-principal permissions are separate.
 
 ## 2. Deploy with Resource Manager
 
