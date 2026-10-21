@@ -49,8 +49,8 @@ Run:
 
 The build downloads and verifies pinned Helm/chart inputs, constructs a compact application payload, and creates:
 
-- `dist/oci-oke-rdma-quickstart-v2.5.0.zip`: source suitable for a repository checkout, including documentation, tests and build scripts.
-- `dist/oci-oke-rdma-quickstart-orm-v2.5.0.zip`: Terraform and `schema.yaml` at the ZIP root, with the application payload, chart and dependency locks.
+- `dist/oci-oke-rdma-quickstart-v<VERSION>.zip`: source suitable for a repository checkout, including documentation, tests and build scripts.
+- `dist/oci-oke-rdma-quickstart-orm-v<VERSION>.zip`: Terraform and `schema.yaml` at the ZIP root, with the application payload, chart and dependency locks.
 - `dist/SHA256SUMS`: checksums for the generated archives.
 
 The source archive excludes generated binaries, payloads, dependencies, local state, credentials, logs and test output. The packager selects explicit source paths and verifies that the ORM payload matches the current application. It also rejects symlinks and state files in the payload. ORM packaging also enforces a conservative **10,000,000-byte** budget on both the configuration files and ZIP, below the Resource Manager stack upload limit. Keep release archives outside Git and attach them to a release using your publishing process.

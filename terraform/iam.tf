@@ -20,6 +20,7 @@ resource "oci_identity_policy" "operator" {
 # read permissions support full-stack refresh, while writes support pool resizing.
 locals {
   capacity_compartment_statements = [
+    "Allow ${local.operator_iam_principal} to manage compute-capacity-reports in compartment id ${var.compartment_ocid}",
     "Allow ${local.operator_iam_principal} to {ORM_STACK_READ, ORM_STACK_USE, ORM_STACK_UPDATE} in compartment id ${var.compartment_ocid}",
     "Allow ${local.operator_iam_principal} to read orm-jobs in compartment id ${var.compartment_ocid} where target.stack.id = '${var.capacity_stack_ocid}'",
     "Allow ${local.operator_iam_principal} to manage orm-jobs in compartment id ${var.compartment_ocid} where all {target.stack.id = '${var.capacity_stack_ocid}', any {target.job.operation = 'PLAN', target.job.operation = 'APPLY'}}",
@@ -38,7 +39,6 @@ locals {
     "Allow ${local.operator_iam_principal} to read policies in compartment id ${var.compartment_ocid}",
   ]
   capacity_tenancy_statements = [
-    "Allow ${local.operator_iam_principal} to manage compute-capacity-reports in tenancy",
     "Allow ${local.operator_iam_principal} to read dynamic-groups in tenancy",
     "Allow ${local.operator_iam_principal} to read policies in tenancy",
     "Allow ${local.operator_iam_principal} to inspect compartments in tenancy",

@@ -27,6 +27,3 @@ terraform/operator/payload/
 !.env.example
 admin.token
 kubeconfig
-CHANGELOG.md
-CONTRIBUTING.md
-VERSION

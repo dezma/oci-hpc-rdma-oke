@@ -17,6 +17,7 @@ if not re.fullmatch(r'[a-z][a-z0-9-]{2,23}',a.name_prefix):p.error('Use a lowerc
 prefix='Allow dynamic-group id '+a.dynamic_group_id+' to '
 where=' in compartment id '+a.compartment_id
 statements=[
+ prefix+'manage compute-capacity-reports'+where,
  prefix+'{ORM_STACK_READ, ORM_STACK_USE, ORM_STACK_UPDATE}'+where,
  prefix+'read orm-jobs'+where+" where target.stack.id = '"+a.stack_id+"'",
  prefix+'manage orm-jobs'+where+" where all {target.stack.id = '"+a.stack_id+"', any {target.job.operation = 'PLAN', target.job.operation = 'APPLY'}}",
@@ -26,7 +27,7 @@ statements=[
  prefix+'read cluster-work-requests'+where,
  prefix+'manage instance-family'+where,
 ]+[prefix+verb+' '+resource+where for verb,resource in [('read','virtual-network-family'),('use','subnets'),('use','vnics'),('use','private-ips'),('use','network-security-groups'),('read','compute-clusters'),('read','buckets'),('read','bastion-family'),('read','policies')]]
-tenancy=[prefix+'manage compute-capacity-reports in tenancy']+[prefix+verb+' '+resource+' in tenancy' for verb,resource in [('read','dynamic-groups'),('read','policies'),('inspect','compartments'),('inspect','availability-domains'),('read','objectstorage-namespaces')]]
+tenancy=[prefix+verb+' '+resource+' in tenancy' for verb,resource in [('read','dynamic-groups'),('read','policies'),('inspect','compartments'),('inspect','availability-domains'),('read','objectstorage-namespaces')]]
 out=Path(a.output_dir);out.mkdir(parents=True,exist_ok=True)
 for filename,compartment,name,rules in [('compartment.json',a.compartment_id,a.name_prefix+'-capacity-ui',statements),('tenancy.json',a.tenancy_id,a.name_prefix+'-capacity-ui-read',tenancy)]:
     path=out/filename

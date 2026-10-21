@@ -1,12 +1,8 @@
-# Performance measurement guide (v2.8.0)
+# Performance measurement guide
 
 ## Before running tests
 
-Update the application using the application-only updater. Rebuild and push the tools image
-on the operator VM using README-OPERATOR-VM.md, then save its immutable digest in the UI.
-The v2.8.0 image adds MPI/UCX, SSH launch tools and numactl. Existing images can still run
-quick, sweep and loaded profiles; they cannot run MPI/NUMA until those tools are present.
-Keep the pull secret configured in both documented namespaces.
+Complete [image and registry setup](IMAGE-PULL-SECRET.md) on the operator VM and save the pushed immutable digest in the configuration. Verify MPI/UCX, SSH tools and numactl are present before pushing. Keep the pull secret configured in both namespaces.
 
 Run host readiness and ensure Dranet devices are valid/free. Stop application traffic on test
 workers for extended profiles. Tests consume exclusive physical NIC claims but do not reserve
@@ -82,9 +78,7 @@ unmeasured. A single-worker pool cannot establish cross-node RDMA performance.
 
 ## Validation status
 
-Unit and UI tests validate orchestration, parsing, comparison and timing semantics. Live MPI,
-NUMA affinity, image build and performance acceptance must be checked in the target OKE tenancy.
-This release does not claim measured performance results from the development environment.
+Validate each enabled profile in your own cluster. Results depend on the image, shape, placement, runtime policy and current load.
 
 References:
 - https://docs.open-mpi.org/en/v5.0.5/launching-apps/ssh.html

@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 init_db()
 
-app = FastAPI(title="OKE RDMA Control Center", version="2.8.2", docs_url=None, redoc_url=None)
+app = FastAPI(title="OKE RDMA Control Center", version="2.9.0", docs_url=None, redoc_url=None)
 
 
 @app.exception_handler(ProviderError)

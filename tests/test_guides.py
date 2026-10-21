@@ -12,7 +12,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def test_guide_commands_parse_and_local_links_resolve():
-    for name in ['README.md','README-UI.md','README-OPERATOR-VM.md','docs/RECOVERY.md']:
+    for name in ['README.md','README-UI.md','README-OPERATOR-VM.md','docs/RECOVERY.md','docs/IMAGE-PULL-SECRET.md','docs/TROUBLESHOOTING.md']:
         path=ROOT/name;text=path.read_text()
         assert text.count('```')%2==0
         for block in re.findall(r'```bash\n(.*?)```',text,re.S):
@@ -26,7 +26,7 @@ def test_guide_commands_parse_and_local_links_resolve():
 
 def test_registry_prompt_works_in_a_terminal_without_exposing_password(tmp_path):
     import pty
-    text=(ROOT/'README-OPERATOR-VM.md').read_text()
+    text=(ROOT/'docs/IMAGE-PULL-SECRET.md').read_text()
     block=next(b for b in re.findall(r"python3 - <<'PY'\n(.*?)\nPY",text,re.S) if 'getpass' in b)
     # Replace kubectl with a local recorder; no cluster or credentials used.
     stub=tmp_path/'kubectl'

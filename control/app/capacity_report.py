@@ -1,6 +1,7 @@
 """Compute capacity snapshots scoped to the managed pool; no provisioning."""
 import json
 import time
+from .diagnostics import sanitize_output
 
 
 def normalize(value):
@@ -13,8 +14,9 @@ def normalize(value):
 
 def collect(provider, pool, target):
     before = pool['node_config_details']['size']
+    compartment = pool.get('compartment_id')
     report = {'checked_at': time.time(), 'region': provider.s.region,
-              'shape': pool.get('node_shape'), 'additional_workers': target - before,
+              'shape': pool.get('node_shape'), 'compartment_id': compartment, 'additional_workers': target - before,
               'status': 'not_required', 'rows': [],
               'note': 'Compute availability snapshot only. Counts may not be disclosed. This does not reserve capacity or verify Compute Cluster placement, quota or RDMA health.'}
     if target <= before:
@@ -26,8 +28,8 @@ def collect(provider, pool, target):
         for fd in placement.get('fault_domains') or [None]:
             if ad:
                 scopes.add((ad, fd))
-    if not provider.s.tenancy_id or not report['shape'] or not scopes or len(scopes) > 9:
-        report['error'] = 'Cannot establish tenancy, shape and bounded AD/FD placement scopes from the managed pool.'
+    if not compartment or not report['shape'] or not scopes or len(scopes) > 9:
+        report['error'] = 'Cannot establish node-pool compartment, shape and bounded AD/FD placement scopes from the managed pool.'
         return report
     config = pool.get('node_shape_config') or {}
     shape_config = {out: config[key] for key, out in [('ocpus', 'ocpus'), ('memory_in_gbs', 'memoryInGBs')] if config.get(key) is not None}
@@ -39,13 +41,16 @@ def collect(provider, pool, target):
         if shape_config:
             request['instanceShapeConfig'] = shape_config
         row = {'availability_domain': ad, 'fault_domain': fd,
-               'availability_status': 'UNAVAILABLE', 'available_count': None}
+               'availability_status': 'REPORT_UNAVAILABLE', 'available_count': None}
         try:
             result = provider.oci(['compute', 'compute-capacity-report', 'create',
-                '--compartment-id', provider.s.tenancy_id, '--availability-domain', ad,
+                '--compartment-id', compartment, '--availability-domain', ad,
                 '--shape-availabilities', json.dumps([request]), '--no-retry'], check=False, timeout=35)
             if result.returncode:
-                raise ValueError('OCI report request failed. Check tenancy-level COMPUTE_CAPACITY_REPORT_CREATE permission, service availability and supported shape scope, then retry.')
+                detail, _ = sanitize_output((result.stderr or result.stdout or 'No CLI error detail returned.'), max_bytes=1600)
+                row['request_error'] = detail
+                row['cli_exit_code'] = result.returncode
+                raise ValueError('OCI capacity request failed for node-pool compartment ' + compartment + ': ' + detail)
             data = normalize(json.loads(result.stdout)['data'])
             if data.get('availability_domain') != ad:
                 raise ValueError('OCI report returned a different availability domain.')
@@ -70,7 +75,7 @@ def collect(provider, pool, target):
                     'available_count': count if type(count) is int and count >= 0 else None})
             continue
         except Exception as exc:
-            row['error'] = str(exc)[:500]
+            row['error'] = sanitize_output(str(exc), max_bytes=2000)[0]
         report['rows'].append(row)
     statuses = [r['availability_status'] for r in report['rows']]
     report['status'] = ('available' if all(s == 'AVAILABLE' for s in statuses) else

@@ -1,4 +1,12 @@
-## Build the tools image and configure registry access on the operator VM
+# Build the tools image and set up registry access
+
+**Where:** operator VM, signed in as `opc`. **Before you start:** complete [deployment and access](../README.md). You need a working operator shell, permission to push an OCIR image, and an OCI auth token. UI and terminal users both complete this procedure once.
+
+An image is the software inside the test containers. A Dockerfile is its build recipe. Pushing uploads the built image to OCIR. The immutable digest identifies its exact contents. A pull secret gives Kubernetes permission to download it. These are separate steps; creating a Dockerfile or logging Podman in does not complete the rest.
+
+Keep one SSH session open throughout this page. Commands use Bash variables set in earlier steps. If reconnecting, set those variables again. Run commands individually and stop if a command fails.
+
+
 
 An image pull secret is a Kubernetes object containing registry credentials. `ocir-pull` is the name you choose for that object. It is not an OCI image OCID, a token supplied by this tool, or the Control Center login token. This walkthrough builds and publishes the tools image on the operator VM, then creates the secrets that let workers pull it. Complete the steps in order. You can prepare everything with zero workers; testing an actual worker pull needs workers later.
 
@@ -35,9 +43,9 @@ cd "$HOME/rdma-tools-build"
 
 Expected architecture: `x86_64` for this project's operator and workers. Stop and review the architecture if yours differs; this guide does not configure cross-architecture emulation. Installing Podman does not install or change the worker CRI-O runtime.
 
-### 4. Write the release's tools-image Dockerfile
+### 4. Create the tools-image Dockerfile
 
-This is the complete `workloads/rdma-tools/Dockerfile` from v2.6.0. You can paste it on the operator without copying the full source archive. The ORM archive is not the container build context.
+This is the complete `workloads/rdma-tools/Dockerfile`. You can paste it on the operator without copying the full source archive. The ORM archive is not the container build context.
 
 ```bash
 cat > Dockerfile <<'DOCKERFILE'
@@ -46,7 +54,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     perftest rdma-core ibverbs-utils libibverbs1 ibverbs-providers \
     iproute2 iputils-ping ethtool pciutils procps util-linux jq curl \
-    python3 ca-certificates coreutils \
+    python3 python3-mpi4py openmpi-bin libucx0 ucx-utils openssh-server openssh-client numactl passwd ca-certificates coreutils \
     && rm -rf /var/lib/apt/lists/*
 # The same immutable image is used in two reviewed modes:
 # 1. non-privileged Dranet IPvlan RDMA validation pods; and
@@ -68,7 +76,7 @@ read -r -p 'Tenancy Object Storage namespace: ' RDMA_TENANCY_NS
 read -r -p 'Repository name (for example rdma-tools): ' RDMA_REPOSITORY
 read -r -p 'Registry push username (including tenancy/domain): ' RDMA_PUSH_USER
 RDMA_IMAGE_REPO="${RDMA_REGISTRY}/${RDMA_TENANCY_NS}/${RDMA_REPOSITORY}"
-RDMA_BUILD_TAG="v2.6.0-$(date -u +%Y%m%dT%H%M%SZ)"
+RDMA_BUILD_TAG="tools-$(date -u +%Y%m%dT%H%M%SZ)"
 RDMA_TAGGED_IMAGE="${RDMA_IMAGE_REPO}:${RDMA_BUILD_TAG}"
 printf 'Image to build: %s\n' "$RDMA_TAGGED_IMAGE"
 sudo install -d -m 700 /var/lib/oke-rdma-image-build
@@ -79,10 +87,26 @@ At the password prompt, enter the push user's **OCI auth token** from step 2. Do
 
 ### 6. Build, then push and capture the registry digest
 
-Run each command only after the previous command succeeds:
+Run each command only after the previous command succeeds. Build from the directory containing the Dockerfile you just created:
 
 ```bash
-sudo podman build --platform linux/amd64 -t "$RDMA_TAGGED_IMAGE" .
+sudo podman build --platform linux/amd64 -f "$PWD/Dockerfile" -t "$RDMA_TAGGED_IMAGE" .
+```
+
+Verify the built image before pushing. Every executable must be found and Python must print an MPI version. This checks installed software; RDMA functionality is tested later on the workers.
+
+```bash
+sudo podman run --rm --entrypoint /bin/sh "$RDMA_TAGGED_IMAGE" -ec '
+  for tool in numactl mpirun ssh sshd ssh-keygen usermod ucx_info; do
+    command -v "$tool" || { printf "MISSING: %s\n" "$tool" >&2; exit 1; }
+  done
+  python3 -c "from mpi4py import MPI; print(MPI.Get_library_version())"
+'
+```
+
+Only after verification passes, push the same tag:
+
+```bash
 sudo podman push --authfile /var/lib/oke-rdma-image-build/auth.json --digestfile /var/lib/oke-rdma-image-build/pushed.digest "$RDMA_TAGGED_IMAGE" "docker://$RDMA_TAGGED_IMAGE"
 ```
 
@@ -125,7 +149,17 @@ kubectl create namespace rdma-workloads --dry-run=client -o yaml | kubectl apply
 kubectl create namespace oke-rdma-diagnostics --dry-run=client -o yaml | kubectl apply --server-side -f -
 ```
 
-Use the same registry hostname used for the push. Enter the pull identity and its token (the same credentials in a simple lab, or the separate read-only identity in production). Paste the complete block below into your interactive SSH terminal. It prompts for the three values; the token is hidden. It reads `/dev/tty` separately for input and output, avoiding the earlier “File or stream is not seekable” failure. Docker is not required. Credentials are supplied to kubectl through standard input, not process arguments.
+Use the same registry hostname used for the push. Enter the pull identity and its token (the same credentials in a simple lab, or the separate read-only identity in production). Paste the complete block below into your interactive SSH terminal. It prompts for the three values; the token is hidden. It reads from your interactive terminal using separate input and output streams. Docker is not required. Credentials are supplied to kubectl through standard input, not process arguments.
+
+Before running the Python block, prepare these three values:
+
+| Prompt | What to enter | Example / where to find it |
+| --- | --- | --- |
+| Registry host (no https, e.g fra.ocir.io) | Only the hostname before the first slash in your tools-image reference. No scheme, repository path or digest. | For `fra.ocir.io/fr9qm01oq44x/oke-rdma/rdma-tools@sha256:…`, enter `fra.ocir.io`. |
+| Registry username (namespace/[domain/]username) | Your tenancy Object Storage namespace, followed by the registry user's identity. Include its identity domain where applicable; brackets are explanatory, not literal. | `fr9qm01oq44x/alice` or `fr9qm01oq44x/Default/alice@example.com`. Use your actual namespace and profile identity, not these example users. The namespace is not the tenancy display name or OCID. |
+| Registry auth token/password | An OCI **auth token belonging to that user**. It is used as the registry password. | In OCI Console, open the user's details → Auth tokens → Generate token (or obtain one through your identity administrator). Copy it when generated; input is hidden. Do not use the Console password, API private key or Kubernetes token. |
+
+The user must have permission to read the image repository. A successful secret apply stores credentials; **it does not validate OCIR login**. A subsequent diagnostic pull verifies that the worker can use them. Operator `podman login` alone does not configure the Kubernetes pull secret.
 
 ```bash
 python3 - <<'PY'
@@ -136,11 +170,15 @@ def prompt(label):
         output.flush()
     with open('/dev/tty', 'r') as terminal:
         return terminal.readline().strip()
-registry = prompt('Registry host (no https://): ')
-username = prompt('Registry username: ')
-password = getpass.getpass('Registry auth token/password: ')
+registry = prompt('Registry host (no https, e.g fra.ocir.io): ')
+username = prompt('Registry username (namespace/[domain/]username): ')
+password = getpass.getpass('Registry auth token/password (OCI auth token, not Console password): ')
 if not registry or not username or not password:
     raise SystemExit('All credential fields are required')
+if '://' in registry or '/' in registry or any(c.isspace() for c in registry):
+    raise SystemExit('Registry host must be a hostname only, for example fra.ocir.io')
+if '/' not in username or username.startswith('/') or username.endswith('/'):
+    raise SystemExit('Use namespace/[domain/]username with your actual OCIR identity')
 auth = base64.b64encode((username + ':' + password).encode()).decode()
 config = json.dumps({'auths': {registry: {'auth': auth}}}).encode()
 encoded = base64.b64encode(config).decode()
@@ -162,7 +200,7 @@ Expected output is a successful `secret/ocir-pull` apply message for each namesp
 1. Open **Setup & validation** → workload configuration.
 2. Copy the complete value from `cat "$HOME/rdma-tools-build/rdma-tools-image-reference.txt"` into the tools-image field.
 3. In **Existing image pull secret**, enter exactly `ocir-pull`. Enter only the name, never the token. Save the configuration.
-4. Save. Terminal-only users can use the authenticated API helper and configuration request in the next guide sections, using this same image reference and `rdma_image_pull_secret` value `ocir-pull`.
+4. Save. Terminal-only users can use the authenticated API helper and configuration request in the [operator guide](../README-OPERATOR-VM.md), using this same image reference and `rdma_image_pull_secret` value `ocir-pull`.
 5. Confirm both objects without exposing credentials:
 
 ```bash
@@ -193,3 +231,16 @@ For a genuinely public image that needs no credentials, leave the UI secret fiel
 Sources: [Oracle: generate an auth token](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionsgenerateauthtokens.htm), [Oracle: registry login identity format](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionslogintoocir.htm), [Oracle: Kubernetes registry pulls](https://docs.oracle.com/en-us/iaas/Content/Registry/Tasks/registrypullingimagesfromocir.htm).
 
 Build references: [Oracle Linux Podman installation](https://docs.oracle.com/en/operating-systems/oracle-linux/podman/install.html), [Podman push and digest file](https://docs.podman.io/en/stable/markdown/podman-push.1.html).
+
+
+## Completion checkpoint
+
+You have verified the image's executables, successfully pushed it, recorded its digest, and created the pull secret in both namespaces. Return to [UI setup](../README-UI.md) or [terminal setup](../README-OPERATOR-VM.md). Save the new digest, not a previously copied one.
+
+## If image verification or login fails
+
+- **Missing numactl, mpirun or mpi4py:** verify the Dockerfile includes those packages, rebuild from this directory, and check the exact tag before pushing. Do not install packages only on the operator or workers; the test runs inside containers.
+- **A newly built image still fails in the UI:** compare the job's `provenance.tools_image` with your new pushed digest. If they differ, save the correct reference in Setup & validation. If they match, inspect that exact image's package contents.
+- **Podman says anonymous access denied:** log in as the same OS user used for the pull. This guide uses `sudo podman` with an explicit auth file during build/push. Kubernetes pull secrets do not authenticate operator Podman. For a later manual check, run `sudo podman login fra.ocir.io` (substitute your registry), enter the full OCIR username and auth token, then rerun the check.
+- **Login succeeded but a worker cannot pull:** use [diagnostic troubleshooting](DIAGNOSTIC-TROUBLESHOOTING.md). Operator login and Kubernetes secrets are separate.
+- **No such file or directory for the Dockerfile:** run `pwd` and `ls -l Dockerfile`; return to the build directory before building.

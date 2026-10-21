@@ -30,7 +30,7 @@ class FakeProvider(LiveProvider):
         if args[:3]==['compute','compute-capacity-report','create']:
             return subprocess.CompletedProcess(args,0,json.dumps({'data':{'availability-domain':'AD1','shape-availabilities':[{'instance-shape':'BM.Optimized3.36','availability-status':'AVAILABLE','available-count':None}]}}),'')
         assert args[:3]==['ce','node-pool','get'], 'Direct OKE writes are forbidden'
-        pool={'id':'pool-id','cluster_id':'cluster-id','lifecycle_state':'ACTIVE','node_shape':'BM.Optimized3.36','node_config_details':{'size':self.size,'placement_configs':[{'availability_domain':'AD1'}]},
+        pool={'compartment_id':'comp','id':'pool-id','cluster_id':'cluster-id','lifecycle_state':'ACTIVE','node_shape':'BM.Optimized3.36','node_config_details':{'size':self.size,'placement_configs':[{'availability_domain':'AD1'}]},
               'node_pool_cycling_details':{'is_node_cycling_enabled':self.cycling},
               'node_eviction_node_pool_settings':{'eviction_grace_duration':self.grace,'is_force_delete_after_grace_duration':self.force},
               'nodes':[{'id':f'instance-{n}','private_ip':f'10.0.1.{n}','lifecycle_state':'ACTIVE'} for n in range(1,self.size+1)]}

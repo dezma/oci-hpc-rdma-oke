@@ -6,7 +6,7 @@ For a guided journey, use [Web UI walkthrough](../README-UI.md) or [operator gui
 
 ## Navigate the workspace
 
-The workspace has five task pages: Overview, Setup & validation, Workers & scaling, Operations, and Maintenance. Maintenance stays last when additional pages are introduced. Deep links open the relevant page and workflow step. A running operation stays visible above every page with its actual phase, elapsed time and completed phase count; progress is not an estimated completion time.
+The workspace has five task pages: Overview, Setup & validation, Workers & scaling, Operations, and Maintenance. Deep links open the relevant page and workflow step. A running operation stays visible above every page with its actual phase, elapsed time and completed phase count; progress is not an estimated completion time.
 
 Operations defaults to the latest attempt of each type. Enable **Include earlier attempts** to inspect retained history. Historical failures are not current health findings. Worker onboarding separates Kubernetes readiness, Dranet device publication, and current host evidence. Newly provisioned OCI workers appear before Kubernetes registration when the stack connection is available.
 
@@ -59,7 +59,7 @@ An IPvlan interface can report link state `UNKNOWN`; evaluate the assigned IP, p
 
 The default functional test performs 5,000 writes of 64 KiB with one RC queue pair, RDMA-CM and TOS 41. Compare runs with the same shape, image, kernel/firmware, devices, traffic class and message/QP settings. A short functional test is not sustained-load capacity qualification.
 
-The operations log retains actual measured values and errors. Validation runs a 64 KiB bandwidth test and an 8-byte latency test with 5,000 iterations each, using RDMA-CM and the configured traffic class. Latency values are in microseconds and represent perftest’s half round-trip estimate. The overview displays bandwidth and latency from the same validation run. It labels evidence for review after 24 hours, a worker addition/removal/replacement/reboot, changed RDMA configuration, an incomplete run, or a newer validation attempt. Historical runs without fleet fingerprints cannot establish current validation. Older bandwidth-only results retain their bandwidth and show latency as unmeasured. A current measurement covers the tested pair, not every worker or network path. The run evidence includes average, median, minimum, maximum, standard deviation, and percentiles when reported. Raw server/client output and cleanup status are retained. No fixed latency threshold is imposed because placement, traffic, firmware, and workload conditions affect comparisons. Export a support bundle for an engineering handoff. It includes bounded inventory, configuration and operation summaries, measurement provenance, and diagnostic counts. It excludes tokens, secret contents, raw logs, job payloads, free-form errors, Terraform state and plans. Worker identifiers remain: review the archive before sharing. Individual diagnostic reports are available separately. Demo mode shows sample inventory and never reports a fabricated measurement.
+The operations log retains actual measured values and errors. Validation runs a 64 KiB bandwidth test and an 8-byte latency test with 5,000 iterations each, using RDMA-CM and the configured traffic class. Latency values are in microseconds and represent perftest’s half round-trip estimate. The overview displays bandwidth and latency from the same validation run. It labels evidence for review after 24 hours, a worker addition/removal/replacement/reboot, changed RDMA configuration, an incomplete run, or a newer validation attempt. A current measurement covers the tested pair, not every worker or network path. The run evidence includes average, median, minimum, maximum, standard deviation, and percentiles when reported. Raw server/client output and cleanup status are retained. No fixed latency threshold is imposed because placement, traffic, firmware, and workload conditions affect comparisons. Export a support bundle for an engineering handoff. It includes bounded inventory, configuration and operation summaries, measurement provenance, and diagnostic counts. It excludes tokens, secret contents, raw logs, job payloads, free-form errors, Terraform state and plans. Worker identifiers remain: review the archive before sharing. Individual diagnostic reports are available separately. Demo mode shows sample inventory and never reports a fabricated measurement.
 
 ## Maintain access and configuration
 
@@ -69,7 +69,7 @@ Tools-image and test settings remain editable in the UI. The PF and child range 
 
 On the operator, `oke-rdma-doctor` checks bootstrap and services. Application state is under `/var/lib/oke-rdma-control`; configuration and the token are under `/etc/oke-rdma-control`. Backups and exported snapshots may contain infrastructure identifiers or credentials and require restricted storage.
 
-## Remove the playground
+## Permanently remove the deployment
 
 Export any results to retain. Stop application controllers and pods, then release their claims and clean up validation resources. Review resources created outside the stack, including workload volumes and load balancers, before deletion.
 

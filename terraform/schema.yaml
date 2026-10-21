@@ -13,8 +13,8 @@ troubleshooting: If Apply succeeds but the UI is not ready, use the generated ma
   Bastion command and inspect /var/lib/oke-rdma-control/bootstrap-status.json and
   /var/log/oke-rdma-control-bootstrap.log. Do not expose port 8000 publicly to troubleshoot.
 schemaVersion: 1.1.0
-version: 2.8.2
-packageVersion: 2.8.2
+version: 2.9.0
+packageVersion: 2.9.0
 locale: en
 allowViewState: false
 primaryOutputButton: ${operator_ui_url_after_tunnel}

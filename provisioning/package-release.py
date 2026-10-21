@@ -10,7 +10,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PATTERNS = (
-    'README.md', 'README-*.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'VERSION',
+    'README.md', 'README-*.md', 'CONTRIBUTING.md', 'SECURITY.md', 'VERSION',
     'RELEASE.json', 'LICENSE', 'NOTICE', 'Makefile', 'package.json', 'package-lock.json', '.gitignore',
     '.github/workflows/*.yml', '.github/workflows/*.yaml', 'docs/*.md',
     'provisioning/*.sh', 'provisioning/*.py', 'tests/*.py', 'tests/*.cjs',

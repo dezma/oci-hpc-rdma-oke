@@ -21,7 +21,7 @@ The Resource Manager form includes **Create compartment-level scaling policy** a
 
 The baseline operator policy, node-pool policy and dynamic group have separate provisioning options; see [IAM provisioning choices](IAM.md). Externally managed permissions must apply to the operator instance: verify membership in the dynamic group named by the existing policy. A compartment-scoped `manage all-resources` grant does not replace tenancy-scoped discovery/read access. Disabling creation does not verify or supply those permissions; use the scaling prerequisite review before planning.
 
-For an existing stack, disabling a policy already tracked in Terraform plans deletion of that policy. Review the plan and retain the switch when the managed policy is still needed. A policy whose creation failed will simply be omitted when its switch is disabled. Do not remove Terraform state entries as part of this option change. Review all other planned resource changes before applying a new release archive.
+For an existing stack, disabling a policy already tracked in Terraform plans deletion of that policy. Review the plan and retain the switch when the managed policy is still needed. A policy whose creation failed will simply be omitted when its switch is disabled. Do not remove Terraform state entries as part of this option change. Review every planned resource change before applying configuration maintenance.
 
 Leave `capacity_stack_ocid` empty to omit the optional capacity policies. Normal RDMA setup, validation, and reset remain available.
 
@@ -81,7 +81,7 @@ Confirm these settings in the current stack's Terraform configuration before usi
 ## Plan, review, and apply
 
 1. Refresh capacity and choose a whole target count from 0 through 64.
-2. Select **Generate scale plan** and confirm the environment name. This updates only the stack's `node_count` variable and creates a PLAN job. Existing stack variables are preserved using an ETag-protected update. Infrastructure has not been resized at this stage.
+2. Select **Check capacity and scaling prerequisites** first. Require a passing report, then select **Generate scale plan** and confirm the environment name. This updates only the stack's `node_count` variable and creates a PLAN job. Existing stack variables are preserved using an ETag-protected update. Infrastructure has not been resized at this stage.
 3. Review the before/after worker count and the sanitized Terraform change summary. The guard permits exactly one in-place node-pool size update. It rejects replacements, unknown configuration changes, node cycling, and changes to any other managed resource. Raw plans and Terraform state are never sent to the browser or retained as application reports.
 4. Select **Review and apply plan** and type `SCALE <environment name>`. The application rechecks the stack inputs, ETag, latest OCI job, plan artifact, pool state, and workloads, then applies the exact reviewed PLAN job. It never uses an automatically approved apply.
 5. Track the OCI apply, worker readiness, Dranet device publication, and new-worker host evidence beside the action. New workers inherit the node-pool image, bootstrap, labels, and Dranet DaemonSet configuration.
@@ -100,7 +100,7 @@ Scaling in terminates workers and can discard their node-local data. Keep durabl
 
 ## Readiness and recovery
 
-The tool waits for the requested pool size, Kubernetes readiness, Dranet readiness, and valid published RDMA devices. It then collects host evidence only for new workers or workers whose boot identity changed. Current evidence for other workers is reused. No automatic bandwidth or latency benchmark is run: a capacity/readiness operation is distinct from a measured cross-node workload validation.
+The tool waits for the requested pool size and Kubernetes readiness, then checks host evidence for new workers or workers whose boot identity changed before waiting for Dranet/device publication. Current evidence for other workers is reused. No automatic bandwidth or latency benchmark is run: a capacity/readiness operation is distinct from a measured cross-node workload validation.
 
 If Terraform applies successfully but workers or RDMA devices are still initializing, **Resume recorded operation** continues monitoring and verification. OCI job IDs and submission phases are persisted before and after remote calls. A worker interruption or lost API response never causes an apply to be silently resubmitted. When submission outcome is uncertain, resume searches for the unique recorded operation; if it cannot identify a single job, inspect Resource Manager before taking further action.
 
@@ -110,7 +110,7 @@ The UI refreshes observed capacity on request and during operations. Operation h
 
 ## Readiness before planning
 
-Open **Workers & scaling → Scale workers**, choose the target, then select **Check scaling prerequisites**. This read-only review checks stack ownership, read access, active ORM jobs, cycling configuration, worker readiness and direction-specific restrictions. It makes no stack or infrastructure changes. Write permissions and the contents of a future Terraform plan remain explicitly unverified. Generate-plan becomes available after a passing review; the review expires after five minutes or a changed target. The backend repeats its safety checks for each operation. Stack connection errors identify the OCID, ownership or access issue separately from the environment confirmation field.
+Open **Workers & scaling → Scale workers**, choose the target, then select **Check capacity and scaling prerequisites**. This read-only review checks stack ownership, read access, active ORM jobs, cycling configuration, worker readiness and direction-specific restrictions. It makes no stack or infrastructure changes. Write permissions and the contents of a future Terraform plan remain explicitly unverified. Generate-plan becomes available after a passing review; the review expires after five minutes or a changed target. The backend repeats its safety checks for each operation. Stack connection errors identify the OCID, ownership or access issue separately from the environment confirmation field.
 
 ## Explain a blocked scale plan
 
@@ -122,87 +122,30 @@ For a previously recorded plan, run the read-only helper on the operator using t
 sudo /opt/oke-rdma-control/venv/bin/python provisioning/explain-capacity-plan.py --recorded
 ```
 
-In the extracted operator update, the helper is at the archive root instead of `provisioning/`. It reads the recorded OCI plan, verifies its job/stack identity and prints the gate result. It does not update the stack, submit jobs, or alter the pending operation. Share the field-path output when diagnosing a rejection; the complete Terraform plan can contain sensitive values.
+It reads the recorded OCI plan, verifies its job/stack identity and prints the gate result. It does not update the stack, submit jobs, or alter the pending operation. Share the field-path output when diagnosing a rejection; the complete Terraform plan can contain sensitive values.
 
 After review, discard a blocked scaling target to restore the previous desired count. Apply any intended non-scaling configuration changes through a separately reviewed Resource Manager plan at the current worker count. Generate a fresh scale plan only once the baseline is aligned. A gate rejection alone does not prove which proposed change is desirable.
 
 Equivalent known eviction durations (for example, `PT1H` and `PT60M`) are treated as the same setting by the size-only plan check. Actual grace-period changes, force-deletion changes, unknown values and unrelated edits remain blocked. The error reports safe before/after grace values; apply intended maintenance separately at the current worker count.
 
 
-## Scale-in and single-worker diagnosis (v2.5.2)
 
-In Setup & validation, expand step 2 and choose **Diagnose / recover this worker** on the affected host. The worker dialog opens with the full RDMA support bundle selected. Run the diagnostic, review findings, and download the report. **Assess recovery** checks eligibility without restarting anything. Only an eligible assessment offers separately confirmed recovery; physical no-cable evidence blocks an agent restart. These are the same actions available in Workers & scaling.
+## Capacity report permissions and interpretation
 
-Scale-in no longer requires healthy RDMA or a ready Dranet device on workers being removed. Kubernetes readiness, pool membership, safe eviction, workload and claim checks, and the reviewed size-only Terraform plan still apply. Zero removes every worker in this pool. Partial scale-in lets OKE choose removals and is not a way to target one faulty worker. Existing-worker RDMA health remains required for scale-out, with the worker and actual issue shown.
+The report uses the live node pool's compartment, shape, AD and configured fault domains. The operator identity needs:
 
-
-## Pin the operator image before worker scaling
-
-Resource Manager shows a dropdown of image **names**, not a text field called `operator_image_ocid`. In the stack's variable form, expand **Advanced operator VM** and find **Approved operator image override**. That dropdown saves the selected image's OCID in the internal Terraform variable `operator_image_ocid`. New v2.5.3 Resource Manager forms require a selection.
-
-For a new deployment, choose a specific approved Oracle Linux 9 image compatible with the operator shape. Record both its full name and OCID. For an existing deployment, choose the image already recorded for the operator, not the newest image. The legacy empty setting selects the newest compatible image on each plan, so a later scale plan can also propose an operator image change. An application-only operator update does not change the stack's form or saved variables.
-
-If scaling is blocked on `oci_core_instance.operator` and `source_details[0].source_id`, inspect the recorded plan first. Obtain the **before** image OCID, then look up its display name in OCI Compute Images or from the operator VM:
-
-```bash
-# Run on the operator VM. Substitute the before-image OCID from the recorded plan.
-oci compute image get --image-id '<RECORDED_IMAGE_OCID>' \
-  --auth instance_principal --query 'data.{name:"display-name",id:id}'
+```text
+Allow dynamic-group id <operator-dynamic-group-ocid> to manage compute-capacity-reports in compartment id <node-pool-compartment-ocid>
 ```
 
-If image lookup is denied, use an administrator with image-read access. If the old image is unavailable or absent from the dropdown, stop and review the stack variable with an administrator; do not substitute a similarly named or newer image.
+This permission is included in the generated compartment policy. It creates reports, not instances or reservations. If an instance-principal CLI report already succeeds for this compartment, additional report permission is not required. Other Terraform refresh/discovery permissions remain separate.
 
-1. Copy the recorded image name and OCID before discarding the plan.
-2. In the Control Center choose **Discard target**. This restores the previous worker-count target without resizing workers.
-3. Edit the Resource Manager stack variables. Under **Advanced operator VM → Approved operator image override**, select the matching image name and verify its OCID. Keep the worker count at the current count (three in the reported case). Save the variables.
-4. Refresh capacity in the Control Center and generate a fresh plan for the intended worker count. Only the worker-count change should remain. Investigate any other changed resource before applying.
+The check runs before planning and again before apply. AVAILABLE is a snapshot; the count is displayed only when returned. Not disclosed does not mean zero. REPORT_UNAVAILABLE means the request/response could not establish availability; inspect its sanitized error. OUT_OF_HOST_CAPACITY and HARDWARE_NOT_SUPPORTED are actual returned capacity statuses. Counts do not guarantee placement in the specific Compute Cluster, quota or RDMA readiness.
 
-For direct Terraform use, set `operator_image_ocid` explicitly in your tfvars. The empty-value fallback remains for legacy CLI compatibility; it is not a stable image pin. Image upgrades are separate maintenance changes requiring their own plan review. Do not weaken the size-only scaling gate or add lifecycle ignores to hide an unreviewed image change.
+## Images and worker changes
 
+Select an approved operator image name under Advanced operator VM → Approved operator image override. It must remain pinned during worker scaling, as must the worker image. Review image maintenance separately from node count. A blocked size-only plan is not permission to ignore other Terraform changes.
 
-For single-worker replacement in v2.7.0, see [REPLACEMENT.md](REPLACEMENT.md). Review the updated policy generator: it adds pool-scoped DeleteNode operation permission and OKE work-request reads. Application updates do not install IAM.
+After scale-out, run pair tests or a matrix covering the new workers. The timing panel shows observed provisioning/readiness stages and time until successful validation covers the new identities. Missing timings remain unknown. See [performance](PERFORMANCE.md).
 
-
-## Required capacity-report step before scale-up (v2.7.2)
-
-1. Install the capacity-report IAM permission on the operator's dynamic group at tenancy scope:
-   `Allow dynamic-group id <operator-dynamic-group-ocid> to manage compute-capacity-reports in tenancy`.
-   This resource type grants only COMPUTE_CAPACITY_REPORT_CREATE; it does not grant instance creation.
-   The updated capacity-policy.py generator includes it in tenancy.json. Follow the existing IAM
-   procedure to review and update the policy. The application updater does not install IAM.
-2. In Workers & scaling, choose the desired total worker count. Select **Check capacity and scaling
-   prerequisites**. The report uses the live managed pool's shape, shape configuration, AD and any
-   explicit fault domains, with the configured tenancy OCID as the root compartment.
-3. Review the OCI capacity row, shape, region and check timestamp. AVAILABLE is a point-in-time
-   availability indication. Counts are shown only when the API returns a nonnegative integer;
-   otherwise the UI says **Not disclosed**. A documented count field does not mean the tenancy
-   has access to an exact remaining capacity count.
-4. Generate the plan. The backend queries OCI again before changing the stack target. A failed
-   capacity check at this stage leaves stack variables unchanged and creates no capacity operation.
-5. Review and apply the size-only plan. OCI capacity is queried again before submitting APPLY.
-   If this check fails, the plan remains AWAITING_REVIEW; the stack target is still the planned
-   target, but no APPLY is submitted. Retry Apply before expiry or discard the target. An expired
-   plan must be discarded and regenerated. Never delete the journal to bypass a failed check.
-6. Continue normal new-worker host, Dranet device and cross-node RDMA validation after provisioning.
-
-OUT_OF_HOST_CAPACITY, HARDWARE_NOT_SUPPORTED, an unknown status, permission failure, timeout,
-missing placement data or an unusable response blocks scale-up. Unavailable reports are not shown
-as zero capacity. An AVAILABLE response without a count can proceed; it does not establish that
-all requested workers can be allocated. For a single returned scope, a disclosed count below the
-requested increment blocks scale-up. Multi-scope reports are not summed and do not establish
-count sufficiency; conservatively, every returned configured scope must report AVAILABLE.
-Scale-down does not query or require this report. A zero-worker pool can be checked using its
-configured shape and placement; running workers are not required for the report.
-
-Reports are snapshots, not reservations or quota checks. They do not establish capacity within a
-specific Compute Cluster or validate RDMA health. These remain separate from desired, observed,
-Kubernetes Ready and RDMA-verified counts. The operation retains planning and apply report evidence,
-including collection time. An old snapshot is never reused to authorize a new plan or apply.
-
-Operator API: `api GET '/api/v1/capacity/readiness?target=3'` uses the same check. Planning/applying through API jobs
-also enforces the reports, so the UI cannot bypass them.
-
-References:
-- https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/compute/compute-capacity-report/create.html
-- https://docs.oracle.com/en-us/iaas/tools/python/latest/api/core/models/oci.core.models.CapacityReportShapeAvailability.html
-- https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/corepolicyreference_topic-Details_for_Verb__ResourceType_Combinations.htm
+Use [worker replacement](REPLACEMENT.md) for deliberate replacement of one defective worker while retaining the intended count.

@@ -1,7 +1,11 @@
 {
   "name": "oke-hpc-control-center",
-  "version": "2.8.2",
+  "version": "2.9.0",
   "private": true,
-  "scripts": {"test:ui": "node tests/test_ui.cjs"},
-  "devDependencies": {"jsdom": "26.1.0"}
+  "scripts": {
+    "test:ui": "node tests/test_ui.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
 }

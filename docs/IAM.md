@@ -25,13 +25,8 @@ A policy granting an operator dynamic group `manage all-resources in compartment
 
 The identity running the Resource Manager job also needs permission to provision the resources selected in the form. The operator's existing permissions and the provisioning caller's permissions are separate. Existing external IAM avoids creating the selected IAM resources; it does not remove the caller's other provisioning requirements.
 
-## Existing stacks
+## Changes to a deployed environment
 
-Keep the defaults for IAM resources you want Terraform to continue managing. Explicit `moved` blocks map the original baseline policy, node-pool policy and dynamic-group addresses to their optional indexed addresses. With creation enabled, these moves preserve the resource identities without recreating them.
+Disabling creation of a policy already managed by Terraform can plan its deletion. Establish replacement access before making that change, and review the plan. A supplied existing group OCID does not change membership. After operator replacement, verify that an instance-specific rule matches the new VM.
 
-Disabling an already managed resource plans its deletion. Establish replacement access first and review the plan, especially before replacing the operator's dynamic group. An externally created group or policy is not imported, modified or deleted by these options. Do not remove state entries as a routine part of enabling these options.
-
-When applying a new release archive to an existing stack, review the entire plan, including operator bootstrap changes. Keep worker count unchanged while establishing the desired IAM baseline; perform scaling as a separate reviewed operation.
-
-
-For single-worker replacement in v2.7.0, see [REPLACEMENT.md](REPLACEMENT.md). Review the updated policy generator: it adds pool-scoped DeleteNode operation permission and OKE work-request reads. Application updates do not install IAM.
+Capacity-report permission belongs in the node-pool compartment. See [capacity](CAPACITY.md) for the statement and the separate Terraform discovery permissions. Worker replacement additionally needs pool-scoped DeleteNode and work-request access; review the generated policy before using [replacement](REPLACEMENT.md).

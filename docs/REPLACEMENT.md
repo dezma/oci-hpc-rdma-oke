@@ -1,6 +1,4 @@
-# Replace a defective managed worker — v2.7.0
-
-Use replacement when diagnosis points to a persistent worker problem, such as a selected mlx5 PF with no physical link after OCA recovery has been ruled out or has failed. Replacement terminates that exact compute instance. It cannot fix a shared image, network, placement or bootstrap defect; the new worker may have the same symptom.
+# Replace a defective managed worker — Use replacement when diagnosis points to a persistent worker problem, such as a selected mlx5 PF with no physical link after OCA recovery has been ruled out or has failed. Replacement terminates that exact compute instance. It cannot fix a shared image, network, placement or bootstrap defect; the new worker may have the same symptom.
 
 ## Prerequisites and permissions
 
@@ -8,9 +6,9 @@ Use replacement when diagnosis points to a persistent worker problem, such as a 
 - A connected Resource Manager stack owning this cluster and pool, no pending capacity/recovery/replacement operation, and no active Resource Manager job.
 - Saved operator image matching Terraform state, explicit worker image matching the current node-pool image, and the same desired worker count in the stack and pool. Pool-wide cycling must be disabled.
 - Kubernetes node identity must map to an ACTIVE OCI instance in this managed pool. The tool will not select a destructive target by IP address alone. Kubernetes Ready is not required for preview, but a missing/unidentifiable Kubernetes node requires administrator diagnosis outside this workflow.
-- Stop application controllers targeting the worker and safely remove their workloads first. This release requires the selected node to be application-idle. Only completed pods and verified kube-system DaemonSets are exempted. All resource claims and claim templates, including pending claims elsewhere in the cluster, block replacement. Do not delete live application claims just to bypass this check.
+- Stop application controllers targeting the worker and safely remove their workloads first. The tool requires the selected node to be application-idle. Only completed pods and verified kube-system DaemonSets are exempted. All resource claims and claim templates, including pending claims elsewhere in the cluster, block replacement. Do not delete live application claims just to bypass this check.
 - Pause changes made outside this tool, including Resource Manager applies and OKE node cycling. The local lock does not lock the OCI Console or another administrator's session.
-- The operator's existing capacity IAM remains required. v2.7.0 adds a pool-scoped `manage cluster-node-pools` statement restricted to `request.operation = 'DeleteNode'`, and compartment-scoped `read cluster-work-requests`. It does not grant an unrestricted delete-node-pool action. The existing instance/network permissions used by managed-pool operations remain necessary.
+- The operator's existing capacity IAM remains required. adds a pool-scoped `manage cluster-node-pools` statement restricted to `request.operation = 'DeleteNode'`, and compartment-scoped `read cluster-work-requests`. It does not grant an unrestricted delete-node-pool action. The existing instance/network permissions used by managed-pool operations remain necessary.
 
 For an existing deployment, regenerate and review the policy files with `provisioning/capacity-policy.py` (also included as `capacity-policy.py` in the application update). Follow `docs/CAPACITY.md` for the complete command and policy installation procedure. This generator writes reviewable JSON; it does not apply IAM changes. Update the existing policy deliberately with your administrator. An application-only update does not install IAM. Read access and preview success do not prove mutation permission; OCI checks it at submission. Do not use the new ORM package merely to change IAM without reviewing its full plan, because its new payload can replace the operator.
 
@@ -21,7 +19,7 @@ For an existing deployment, regenerate and review the policy files with `provisi
 3. In worker details, select **Preview worker replacement**. Review the exact Kubernetes node name, OCI instance OCID, pinned worker image, intended pool count, findings timestamp, workload list, blockers and temporary protections. A preview lasts five minutes and authorizes no deletion.
 4. Select **Review replacement** and type `REPLACE <your-environment-name>`. The confirmation repeats the worker name and instance identity. The server rechecks the preview, worker UID/boot identity, pool membership, image/settings and stack state.
 5. The tool cordons the selected worker and verifies admission protection. New pods/bindings targeting that worker and new claims/templates cluster-wide are temporarily denied. It then makes one OKE DeleteNode request with pool decrement **false**, eviction grace **60 minutes**, and forced termination **false**. OKE performs its managed drain and respects eviction/disruption constraints. Expect temporary loss of one worker's capacity; this is not surge replacement.
-6. In **Workers & scaling**, use **Resume / verify replacement** to observe progress. The retained panel stays visible after the old node disappears. Each click performs a bounded observation/verification attempt; this version does not continuously poll OCI after the job finishes. A request/check completing is not the same as replacement success.
+6. In **Workers & scaling**, use **Resume / verify replacement** to observe progress. The retained panel stays visible after the old node disappears. Each click performs a bounded observation/verification attempt; the tool does not continuously poll OCI after the job finishes. A request/check completing is not the same as replacement success.
 7. Resume identifies exactly one new ACTIVE instance while preserving all original surviving members. It checks the new Kubernetes identity, Ready/schedulable state, host readiness (selected PF/carrier/MTU, OCA-configured address, shared RDMA, NRI), Dranet/device publication, and then runs a quick cross-node validation against a healthy free peer. Readiness can take time; resume later when OCI/bootstrap progresses.
 8. Only **COMPLETE / Verified** means the functional test passed. The new instance ID, worker name, work-request ID, host evidence, test result and timeline remain in the replacement evidence. Operation summaries are included in the support bundle. Download the underlying host reports separately for full diagnostic output.
 
@@ -45,7 +43,7 @@ The admission guard is removed when the old OCI and Kubernetes identities have l
 
 If the replacement has joined but further setup, scaling or cleanup is needed, **Close for manual review** releases the local lock only after the safety checks pass. For a one-worker pool, close the explicit functional-test-pending result, add a second worker through the normal reviewed capacity flow, and run pair validation. Closing a pre-submission or rejected attempt does not automatically uncordon the original worker. Review that worker before an administrator uncordons it.
 
-A lost response without a work-request ID is reconciled conservatively from exact old/new identities. If the original worker remains and submission cannot be proven rejected or terminal, the tool retains the lock. An administrator must inspect OCI activity and resolve the operation; there is no journal-delete or force-close shortcut in this release. If an interrupted functional test left owned pods/claims, use validation cleanup, then resume. No interruption path automatically replays deletion.
+A lost response without a work-request ID is reconciled conservatively from exact old/new identities. If the original worker remains and submission cannot be proven rejected or terminal, the tool retains the lock. An administrator must inspect OCI activity and resolve the operation; there is no journal-delete or force-close shortcut in the tool. If an interrupted functional test left owned pods/claims, use validation cleanup, then resume. No interruption path automatically replays deletion.
 
 ## Operator VM route
 
@@ -80,12 +78,12 @@ After replacement, a later Resource Manager refresh will observe the new compute
 Sources: [OKE termination and replacement](https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/replace-worker-node-top.htm), [OCI SDK DeleteNode parameters](https://docs.oracle.com/en-us/iaas/tools/python/latest/api/container_engine/client/oci.container_engine.ContainerEngineClient.html), [OKE policy reference](https://docs.oracle.com/en-us/iaas/Content/Identity/Reference/contengpolicyreference.htm).
 
 
-## Hardware identity and reuse (v2.7.1)
+## Hardware identity and reuse
 
 Run host readiness before replacing a worker whenever it can still run diagnostic pods.
 The check records the OCI instance ID, Kubernetes UID and boot ID, DMI product serial,
 and selected PF MAC. Open worker Details to see the serial, MAC and matches against
-previous instance IDs. An older valid readiness cache is refreshed once after this update.
+previous instance IDs. 
 Missing serials appear as Not collected; they are never treated as matching identities.
 
 Replacement preview retains this baseline. Resume records the new host observation and
