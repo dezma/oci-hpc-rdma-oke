@@ -1,0 +1,9 @@
+{
+  "helm_version": "v3.19.0",
+  "dranet_version": "v1.5.0",
+  "chart_oci_digest": "sha256:00de1885cf7b82a2b485debcd685cf3a8c1e1ad20f11021a1e969959ce7d3d1c",
+  "files": {
+    "helm": "e4722a77de9df824214aaf19d43687c49f7cbcf3b107905acea002173777d486",
+    "dranet-v1.5.0.tgz": "994539628609a5e9b7411dd307ef6e94ba56734a7b1a5f0db3544501ec19fc52"
+  }
+}

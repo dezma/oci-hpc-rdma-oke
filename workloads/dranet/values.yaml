@@ -1,0 +1,17 @@
+image:
+  repository: registry.k8s.io/networking/dranet
+  tag: v1.5.0
+  pullPolicy: IfNotPresent
+nodeSelector:
+  oci-rdma: 'true'
+  oke-rdma-mode: dranet
+args:
+  moveIBInterfaces: false
+  cloudProviderHint: OKE
+  profileProvider: cloud
+  filter: '"dra.net/ifName" in attributes && attributes["dra.net/ifName"].StringValue
+    == "ens800f0np0"'
+  cloudProviderOptions:
+    oke:
+      rdma-child-ipv4-cidr: 10.208.0.0/12
+kubeletRootDir: /var/lib/kubelet

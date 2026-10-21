@@ -1,0 +1,62 @@
+# Replace the tools image placeholder with your immutable digest before applying.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: rdma-example
+  namespace: rdma-workloads
+  labels:
+    app.kubernetes.io/part-of: oke-rdma-quickstart
+spec:
+  devices:
+    requests:
+    - name: rdma
+      exactly:
+        deviceClassName: dra.net
+        selectors:
+        - cel:
+            expression: device.driver == "dra.net" && has(device.attributes["dra.net"].ifName)
+              && device.attributes["dra.net"].ifName == "ens800f0np0" && device.attributes["dra.net"].rdma
+              == true && has(device.attributes["dra.net"].ipv4) && device.attributes["dra.net"].ipv4.matches("^10[.]2(2[4-9]|3[0-9])[.]")
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdma-example
+  namespace: rdma-workloads
+  labels:
+    app.kubernetes.io/part-of: oke-rdma-quickstart
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+  nodeSelector:
+    oci-rdma: 'true'
+    oke-rdma-mode: dranet
+  resourceClaims:
+  - name: rdma
+    resourceClaimName: rdma-example
+  containers:
+  - name: tools
+    image: REPLACE_WITH_YOUR_REGISTRY/rdma-tools@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+    securityContext:
+      privileged: false
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+        add:
+        - IPC_LOCK
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+      claims:
+      - name: rdma

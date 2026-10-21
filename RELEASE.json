@@ -1,0 +1,12 @@
+{
+  "version": "2.8.2",
+  "network_profile": "Dranet OKE IPvlan",
+  "dranet": "v1.5.0",
+  "helm": "v3.19.0",
+  "deployment_guide": "docs/DEPLOYMENT.md",
+  "runtime_dependencies": "checksum-verified bootstrap downloads",
+  "orm_build_budget_bytes": 10000000,
+  "payload_sha256": "841c597aec35c747751cf3d79aeae70fc4862b05fa73135a35395dc410e566c1",
+  "orm_sha256": "c13977b399fa823388de705b1effacd88954b2584c6fb8b2c134a63d30c7aecb",
+  "orm_bytes": 223710
+}
