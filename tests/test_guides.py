@@ -12,7 +12,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def test_guide_commands_parse_and_local_links_resolve():
-    for name in ['README.md','README-UI.md','README-OPERATOR-VM.md','docs/RECOVERY.md','docs/IMAGE-PULL-SECRET.md','docs/TROUBLESHOOTING.md']:
+    for name in ['README.md', *[str(p.relative_to(ROOT)) for p in (ROOT/'docs').glob('*.md')]]:
         path=ROOT/name;text=path.read_text()
         assert text.count('```')%2==0
         for block in re.findall(r'```bash\n(.*?)```',text,re.S):

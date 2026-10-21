@@ -14,7 +14,7 @@ SOURCE_PATTERNS = (
     'RELEASE.json', 'LICENSE', 'NOTICE', 'Makefile', 'package.json', 'package-lock.json', '.gitignore',
     '.github/workflows/*.yml', '.github/workflows/*.yaml', 'docs/*.md',
     'provisioning/*.sh', 'provisioning/*.py', 'tests/*.py', 'tests/*.cjs',
-    'control/guides/*.md', 'control/guides/docs/*.md', 'control/app/*.py', 'control/validation/*.py', 'control/web/*.html',
+    'control/app/*.py', 'control/validation/*.py', 'control/web/*.html',
     'control/web/*.js', 'control/web/*.css', 'control/requirements.lock',
     'control/runtime-requirements.lock', 'control/bootstrap/*.sh',
     'control/systemd/README.md', 'control/vendor/README.md',
@@ -51,7 +51,7 @@ def digest(path: Path) -> str:
 
 def verify_payload(root: Path) -> Path:
     payload = root / 'terraform/operator/payload/oke-rdma-control.tar.gz'
-    allowed_dirs = {'app', 'web', 'validation', 'vendor', 'bootstrap', 'guides'}
+    allowed_dirs = {'app', 'web', 'validation', 'vendor', 'bootstrap'}
     with tarfile.open(payload, 'r:gz') as archive:
         files = {}
         for item in archive.getmembers():

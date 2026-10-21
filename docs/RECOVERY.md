@@ -39,7 +39,7 @@ Persistent physical-link failure may require reviewing placement, image/bootstra
 
 ## Operator VM commands
 
-First define `api` using the [operator guide](../README-OPERATOR-VM.md). Replace the node and environment examples. Submit one preview, poll the returned job and review its result:
+First define `api` using the [operator guide](OPERATOR-VM.md). Replace the node and environment examples. Submit one preview, poll the returned job and review its result:
 
 ```bash
 api POST /api/v1/jobs '{"action":"recovery_assess","node_name":"REPLACE_WITH_NODE_NAME","confirmation":"hpc-oke-rdma"}'

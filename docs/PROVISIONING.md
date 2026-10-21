@@ -35,7 +35,7 @@ An OCI **Compute Cluster** places the physical workers; an OKE **Kubernetes clus
 | 5. Configure and validate | UI or operator API | Hosts pass, devices are published, quick pair test and cleanup pass |
 | 6. Run workloads and manage workers | UI + operator, or operator alone | Your own workload starts with its claim |
 
-Use [the UI guide](../README-UI.md) for browser operations or [the operator VM guide](../README-OPERATOR-VM.md) for terminal operations after step 3. Both use the same [image-build and pull-secret procedure](../docs/IMAGE-PULL-SECRET.md).
+Use [the UI guide](UI.md) for browser operations or [the operator VM guide](OPERATOR-VM.md) for terminal operations after step 3. Both use the same [image-build and pull-secret procedure](../docs/IMAGE-PULL-SECRET.md).
 
 ## 1. Gather your inputs
 
@@ -106,5 +106,5 @@ sudo cat /etc/oke-rdma-control/admin.token
 
 A session expiry requires a new Bastion session and connection, not a new cluster. Keep port 8000 private. Do not copy your private SSH key onto the operator.
 
-**Checkpoint:** operator SSH works; UI users can log in. Continue with [UI setup](../README-UI.md) or [terminal setup](../README-OPERATOR-VM.md).
+**Checkpoint:** operator SSH works; UI users can log in. Continue with [UI setup](UI.md) or [terminal setup](OPERATOR-VM.md).
 

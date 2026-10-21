@@ -5,7 +5,7 @@ A collection failure means the tool could not establish host health. It does not
 ## From the UI
 
 1. Open the failed Host diagnostic result and read the visible error and Next step.
-2. For registry authentication errors, use the credential setup steps in [the UI guide](../README-UI.md) or [the operator guide](../README-OPERATOR-VM.md). Save `ocir-pull` in Setup & validation → Existing image pull secret. Never enter a token in the UI.
+2. For registry authentication errors, use the credential setup steps in [the UI guide](UI.md) or [the operator guide](OPERATOR-VM.md). Save `ocir-pull` in Setup & validation → Existing image pull secret. Never enter a token in the UI.
 3. Download text (or JSON) from that result when more evidence is needed. Look for `EXECUTION_STATUS` and `EVENTS`. The diagnostic pod is normally deleted after evidence capture, so a later `kubectl describe pod` may find nothing.
 4. Correct the specific failure and explicitly rerun the diagnostic. Image-pull errors end collection early; a transient error may succeed on a new run after connectivity is restored.
 5. Only after collection succeeds should you interpret link, MTU, parent IPv4 and OCA findings as host evidence.

@@ -7,7 +7,7 @@ OUT="$ROOT/terraform/operator/payload/oke-rdma-control.tar.gz"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/payload/vendor"
-cp -R "$CONTROL/app" "$CONTROL/web" "$CONTROL/validation" "$CONTROL/bootstrap" "$CONTROL/guides" "$STAGE/payload/"
+cp -R "$CONTROL/app" "$CONTROL/web" "$CONTROL/validation" "$CONTROL/bootstrap" "$STAGE/payload/"
 find "$STAGE/payload" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/payload" -type f -name '*.pyc' -delete
 # Large executables and wheels are downloaded on the operator, never embedded in ORM.

@@ -1,6 +1,6 @@
 # Operations reference
 
-For a guided journey, use [Web UI walkthrough](../README-UI.md) or [operator guide](../README-OPERATOR-VM.md). Recovery controls and failure handling are documented in [RECOVERY.md](RECOVERY.md).
+For a guided journey, use [Web UI walkthrough](UI.md) or [operator guide](OPERATOR-VM.md). Recovery controls and failure handling are documented in [RECOVERY.md](RECOVERY.md).
 
 # Everyday operations
 

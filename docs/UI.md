@@ -1,10 +1,10 @@
 # Web UI guide
 
-Start after [deployment and private access](README.md). Keep the workstation's Bastion tunnel open, open `http://127.0.0.1:18000`, enter the operator's admin token and select **Open workspace**. Check the environment name before making changes.
+Start after [deployment and private access](../README.md). Keep the workstation's Bastion tunnel open, open `http://127.0.0.1:18000`, enter the operator's admin token and select **Open workspace**. Check the environment name before making changes.
 
 ## 1. Prepare the tools image
 
-Even if you use the UI for day-to-day operations, the image build and registry secret setup happen once on the operator VM. Follow [the complete image and registry procedure](docs/IMAGE-PULL-SECRET.md), then return here with:
+Even if you use the UI for day-to-day operations, the image build and registry secret setup happen once on the operator VM. Follow [the complete image and registry procedure](IMAGE-PULL-SECRET.md), then return here with:
 
 - The full pushed image reference ending in `@sha256:` plus 64 hexadecimal characters.
 - The secret name `ocir-pull`, created in both `rdma-workloads` and `oke-rdma-diagnostics`.
@@ -43,7 +43,7 @@ MTU is fixed at 4220. Save and review readiness. Interface and child range becom
 
 In step 2, run the host check and wait for its job. Each intended worker needs successful inventory and host readiness: selected physical interface, carrier/link, parent IPv4 address, MTU, shared RDMA mode and runtime support.
 
-Kubernetes Ready is not the same as RDMA ready. Empty facts or an image-pull error mean collection failed; they do not prove faulty hardware. Open the result's visible Next step and download text if needed. Follow [diagnostic troubleshooting](docs/DIAGNOSTIC-TROUBLESHOOTING.md).
+Kubernetes Ready is not the same as RDMA ready. Empty facts or an image-pull error mean collection failed; they do not prove faulty hardware. Open the result's visible Next step and download text if needed. Follow [diagnostic troubleshooting](DIAGNOSTIC-TROUBLESHOOTING.md).
 
 For one worker, choose **Diagnose / recover this worker**, or open its **Details** under Workers & scaling. Run the full support bundle before attempting recovery. The worker dialog is available from both places.
 
@@ -53,7 +53,7 @@ For one worker, choose **Diagnose / recover this worker**, or open its **Details
 
 In step 3, install or verify Dranet. Wait for completion and usable published devices. Dranet connects Kubernetes ResourceClaims to the RDMA interface.
 
-If deployment uses restricted Kubernetes RBAC, a cluster administrator must install the infrastructure; follow [restricted access](docs/DEPLOYMENT.md). Repeating the UI action does not grant administrator permissions.
+If deployment uses restricted Kubernetes RBAC, a cluster administrator must install the infrastructure; follow [restricted access](DEPLOYMENT.md). Repeating the UI action does not grant administrator permissions.
 
 **Checkpoint:** driver ready, devices valid, and at least two free workers for cross-node tests.
 
@@ -76,7 +76,7 @@ The matrix and detailed baseline table have separate panels. A blank/unmeasured 
 
 Bandwidth is in Gbit/s. Latency is in microseconds and follows perftest's half-round-trip method. p99 describes a tail percentile, not the average. Higher bandwidth and lower latency are generally preferable under comparable conditions. No single threshold proves every application will perform well.
 
-Read [performance measurement](docs/PERFORMANCE.md) for each metric, startup/capacity timing boundaries and limitations. If bandwidth passed but MPI failed, MPI has not passed; inspect the extended-profile error.
+Read [performance measurement](PERFORMANCE.md) for each metric, startup/capacity timing boundaries and limitations. If bandwidth passed but MPI failed, MPI has not passed; inspect the extended-profile error.
 
 ## 7. Run your application
 
@@ -94,7 +94,7 @@ Run apply only if dry-run succeeds. One independently allocated RDMA pod consume
 
 ## 8. Scale worker capacity
 
-Follow [capacity management](docs/CAPACITY.md) to connect the owning Resource Manager stack and verify permissions. In Workers & scaling:
+Follow [capacity management](CAPACITY.md) to connect the owning Resource Manager stack and verify permissions. In Workers & scaling:
 
 1. Enter the desired **total** worker count, not the number to add.
 2. Select **Check capacity and scaling prerequisites**. Read every blocker. The capacity report uses the node pool's compartment and placement.
@@ -109,12 +109,12 @@ Scale-in requires application pods and RDMA claims/templates to be released, and
 
 ## 9. Recover or replace a worker
 
-Use worker Details to collect diagnostics first. **Preview Oracle Cloud Agent restart** shows restart eligibility, identity and impact; review before confirming. It restarts only the fixed agent service on that worker. It is not a fleet reboot or general service control. See [recovery](docs/RECOVERY.md).
+Use worker Details to collect diagnostics first. **Preview Oracle Cloud Agent restart** shows restart eligibility, identity and impact; review before confirming. It restarts only the fixed agent service on that worker. It is not a fleet reboot or general service control. See [recovery](RECOVERY.md).
 
-For a worker that remains defective, **Preview worker replacement** checks the node identity and workload restrictions before a separately confirmed replacement. Replacement is disruptive and keeps the intended pool count; verification needs a healthy free peer for cross-node testing. See [replacement](docs/REPLACEMENT.md).
+For a worker that remains defective, **Preview worker replacement** checks the node identity and workload restrictions before a separately confirmed replacement. Replacement is disruptive and keeps the intended pool count; verification needs a healthy free peer for cross-node testing. See [replacement](REPLACEMENT.md).
 
 ## 10. Troubleshoot and finish safely
 
-Use [troubleshooting](docs/TROUBLESHOOTING.md) for access, registry, host, benchmark and scaling problems. Download diagnostic text and retain the job ID before retrying. Do not include tokens or private keys in reports.
+Use [troubleshooting](TROUBLESHOOTING.md) for access, registry, host, benchmark and scaling problems. Download diagnostic text and retain the job ID before retrying. Do not include tokens or private keys in reports.
 
-Maintenance reset is a deliberate removal of supported RDMA setup, not the first response to an error. Review its preview and stop/release applications first. Closing the UI does not stop billing; see [shutdown and cleanup](docs/OPERATIONS.md).
+Maintenance reset is a deliberate removal of supported RDMA setup, not the first response to an error. Review its preview and stop/release applications first. Closing the UI does not stop billing; see [shutdown and cleanup](OPERATIONS.md).

@@ -365,10 +365,3 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=WEB), name="static")
-
-
-@app.get('/guides/{name}')
-def user_guide(name: str):
-    if name not in {'README.md', 'README-UI.md', 'README-OPERATOR-VM.md'}:
-        raise HTTPException(status_code=404, detail='Guide not found')
-    return FileResponse(ROOT / 'guides' / name, media_type='text/markdown', filename=name)

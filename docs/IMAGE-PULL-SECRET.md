@@ -200,7 +200,7 @@ Expected output is a successful `secret/ocir-pull` apply message for each namesp
 1. Open **Setup & validation** → workload configuration.
 2. Copy the complete value from `cat "$HOME/rdma-tools-build/rdma-tools-image-reference.txt"` into the tools-image field.
 3. In **Existing image pull secret**, enter exactly `ocir-pull`. Enter only the name, never the token. Save the configuration.
-4. Save. Terminal-only users can use the authenticated API helper and configuration request in the [operator guide](../README-OPERATOR-VM.md), using this same image reference and `rdma_image_pull_secret` value `ocir-pull`.
+4. Save. Terminal-only users can use the authenticated API helper and configuration request in the [operator guide](OPERATOR-VM.md), using this same image reference and `rdma_image_pull_secret` value `ocir-pull`.
 5. Confirm both objects without exposing credentials:
 
 ```bash
@@ -235,7 +235,7 @@ Build references: [Oracle Linux Podman installation](https://docs.oracle.com/en/
 
 ## Completion checkpoint
 
-You have verified the image's executables, successfully pushed it, recorded its digest, and created the pull secret in both namespaces. Return to [UI setup](../README-UI.md) or [terminal setup](../README-OPERATOR-VM.md). Save the new digest, not a previously copied one.
+You have verified the image's executables, successfully pushed it, recorded its digest, and created the pull secret in both namespaces. Return to [UI setup](UI.md) or [terminal setup](OPERATOR-VM.md). Save the new digest, not a previously copied one.
 
 ## If image verification or login fails
 

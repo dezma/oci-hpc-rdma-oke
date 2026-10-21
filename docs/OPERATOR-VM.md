@@ -1,6 +1,6 @@
 # Operator VM guide
 
-Use this route to operate from SSH without the browser. Start with [deployment and private access](README.md). All commands on this page run on the **operator VM**, not a worker or Cloud Shell, unless a section explicitly says otherwise.
+Use this route to operate from SSH without the browser. Start with [deployment and private access](../README.md). All commands on this page run on the **operator VM**, not a worker or Cloud Shell, unless a section explicitly says otherwise.
 
 ## 1. Check the operator
 
@@ -9,11 +9,11 @@ kubectl get nodes -o wide
 sudo systemctl status oke-rdma-control --no-pager
 ```
 
-Expected: the control service is active; provisioned workers appear in Kubernetes. A zero-worker deployment has no workers yet. If the service is unavailable, run `oke-rdma-doctor` and follow [troubleshooting](docs/TROUBLESHOOTING.md).
+Expected: the control service is active; provisioned workers appear in Kubernetes. A zero-worker deployment has no workers yet. If the service is unavailable, run `oke-rdma-doctor` and follow [troubleshooting](TROUBLESHOOTING.md).
 
 ## 2. Build the image and create the pull secret
 
-Complete [image build → package verification → registry push → digest → pull-secret setup](docs/IMAGE-PULL-SECRET.md) on this VM. Do not skip package verification: NUMA and MPI require additional tools beyond the basic RDMA benchmark.
+Complete [image build → package verification → registry push → digest → pull-secret setup](IMAGE-PULL-SECRET.md) on this VM. Do not skip package verification: NUMA and MPI require additional tools beyond the basic RDMA benchmark.
 
 ## 3. Define a terminal API helper
 
@@ -174,7 +174,7 @@ Inspect `status.containerStatuses[].state.terminated` for reason, exit code and 
 
 | Evidence | What to investigate next |
 |---|---|
-| FailedToRetrieveImagePullSecret | Secret name, existence and namespace; [image and registry setup](docs/IMAGE-PULL-SECRET.md). |
+| FailedToRetrieveImagePullSecret | Secret name, existence and namespace; [image and registry setup](IMAGE-PULL-SECRET.md). |
 | Unauthorized image pull | Registry hostname, token validity and repository permissions. |
 | Image not found | Repository and exact pushed digest. |
 | Registry connection timeout | Egress, DNS, routing and registry reachability. |
@@ -330,14 +330,14 @@ First complete the quick pair test. Use idle workers. Replace the environment na
 api POST /api/v1/jobs '{"action":"rdma_validation","performance_profile":"numa","server_node":"","client_node":"","confirmation":"hpc-oke-rdma"}'
 ```
 
-Poll the returned job ID. Automatic MPI uses up to eight free workers; selecting both endpoints uses that pair. Matrix measures all ordered pairs among two to eight free workers. Read [performance measurement](docs/PERFORMANCE.md) before interpreting results.
+Poll the returned job ID. Automatic MPI uses up to eight free workers; selecting both endpoints uses that pair. Matrix measures all ordered pairs among two to eight free workers. Read [performance measurement](PERFORMANCE.md) before interpreting results.
 
 ## 12. Diagnose, recover or replace one worker
 
-List node names with `kubectl get nodes`. Use the fixed diagnostic profiles in section 7. Recovery and replacement require a reviewed preview and a separate typed confirmation. The complete terminal requests are in [worker recovery](docs/RECOVERY.md) and [worker replacement](docs/REPLACEMENT.md). Never run reset or delete a worker merely because diagnostic collection failed.
+List node names with `kubectl get nodes`. Use the fixed diagnostic profiles in section 7. Recovery and replacement require a reviewed preview and a separate typed confirmation. The complete terminal requests are in [worker recovery](RECOVERY.md) and [worker replacement](REPLACEMENT.md). Never run reset or delete a worker merely because diagnostic collection failed.
 
 ## 13. End a session or stop using the environment
 
-Closing SSH or the browser tunnel does not stop OCI resources or cancel a queued job. For a temporary pause, stop workloads and use the reviewed scale-to-zero workflow; the operator, cluster and other resources remain. For permanent removal, follow [shutdown and cleanup](docs/OPERATIONS.md).
+Closing SSH or the browser tunnel does not stop OCI resources or cancel a queued job. For a temporary pause, stop workloads and use the reviewed scale-to-zero workflow; the operator, cluster and other resources remain. For permanent removal, follow [shutdown and cleanup](OPERATIONS.md).
 
-Use [troubleshooting](docs/TROUBLESHOOTING.md) when a command fails. `api: command not found` means the helper in section 3 has not been defined in this shell; paste its complete definition again.
+Use [troubleshooting](TROUBLESHOOTING.md) when a command fails. `api: command not found` means the helper in section 3 has not been defined in this shell; paste its complete definition again.

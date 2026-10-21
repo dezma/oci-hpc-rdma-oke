@@ -26,7 +26,7 @@ Build the test tools image on the operator **after** provisioning. Follow [image
 
 With `operator_kubernetes_access_mode=least_privilege_rbac`, a cluster administrator must apply the complete `operator_rbac_manifest` stack output to the intended cluster. This permits curated workload and diagnostic operations but does not grant permission to create all Dranet infrastructure or use administrator-only recovery/replacement.
 
-After successful host checks, a cluster administrator can install Dranet from the full source directory. Save the desired workload settings first and export complete values through the [operator API helper](../README-OPERATOR-VM.md):
+After successful host checks, a cluster administrator can install Dranet from the full source directory. Save the desired workload settings first and export complete values through the [operator API helper](OPERATOR-VM.md):
 
 ```bash
 api GET /api/v1/exports/values > dranet-values.yaml
