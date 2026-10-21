@@ -16,25 +16,6 @@ Deploy a private Kubernetes environment for CPU RDMA workloads on Oracle Cloud I
 
 Unzip the full project on your workstation. Its root contains `README.md`, `terraform/`, `control/`, `provisioning/` and `workloads/`. The application version is in `VERSION`.
 
-## Words you will see
-
-| Terms|
-| --- | --- |
-| Tenancy | Your organisation's OCI account |
-| Compartment | A grouping of OCI resources with its own access policies |
-| OCID | OCI's unique identifier for a resource; copy it from that resource's details page |
-| Region / availability domain (AD) | Geographic region / location within the region where workers are placed |
-| Resource Manager / stack | OCI's Terraform service / the saved configuration and state that own this deployment |
-| OKE / worker / node pool | Managed Kubernetes / a machine that runs pods / workers managed together |
-| Operator VM | The private administration machine where this tool runs; log in as `opc` |
-| Bastion | OCI service for temporary, controlled SSH access to private machines |
-| OCIR / tools image / digest | Container registry / software used inside test containers / exact immutable image identity |
-| Dynamic group / instance principal | IAM membership for machines / the operator authenticating as itself without your API key |
-| RDMA / PF / NUMA | Direct network access to memory / the physical NIC interface / CPU and memory locality within a machine |
-| Dranet / DRA / ResourceClaim | Device driver / Kubernetes device allocation / a request reserving an RDMA device for a pod |
-| OCA | Oracle Cloud Agent, including host configuration/authentication plugins |
-
-An OCI **Compute Cluster** places the physical workers; an OKE **Kubernetes cluster** schedules containers. They are different resources. This design uses both.
 
 ## The complete first-time route
 
