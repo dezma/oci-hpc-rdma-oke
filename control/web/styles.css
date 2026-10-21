@@ -47,3 +47,14 @@ button[aria-busy="true"]{cursor:progress;opacity:.85}button[aria-busy="true"]:be
 .performance-panel tbody tr:hover td{background:#f6faf9}
 #pair-performance .performance-note{margin:0;font-size:12px}
 @media(max-width:760px){#pair-performance{gap:20px}.performance-panel-heading{padding:14px 16px}.performance-panel th,.performance-panel td{padding:14px 16px}.performance-panel table{min-width:620px}}
+
+/* Monitoring toggles are compact controls, not full-width text fields. */
+#monitoring{margin-top:20px}
+#monitoring-form .form-grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:center}
+#monitoring-form label{min-width:0}
+#monitoring-form label:has(input[type="checkbox"]){display:flex;align-items:flex-start;gap:10px;padding:12px 0;cursor:pointer;line-height:1.5}
+#monitoring-form input[type="checkbox"]{flex:0 0 18px;width:18px;height:18px;min-height:18px;margin:0;padding:0;accent-color:var(--accent);cursor:pointer}
+#monitoring-form>.muted{margin:20px 0 14px}
+#monitoring-save-result{display:inline-block;margin:8px 0 8px 12px}
+#monitoring-state{margin-top:24px}
+@media(max-width:760px){#monitoring-form .form-grid{grid-template-columns:minmax(0,1fr)}}

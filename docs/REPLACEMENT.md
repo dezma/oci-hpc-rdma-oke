@@ -1,27 +1,29 @@
-# Replace a defective managed worker.
+# Replace a defective managed worker
+
+Use replacement when diagnosis points to a persistent worker problem and recovery has not restored RDMA. Check the image, bootstrap and placement first: if the fault comes from shared configuration, the new worker may have the same symptom.
 
 ## Prerequisites and permissions
 
-- Live mode and the cluster-administrator Kubernetes access mode. Restricted RBAC is not silently escalated.
+- Live mode and the cluster-administrator Kubernetes access mode. Use a cluster-administrator identity for this workflow.
 - A connected Resource Manager stack owning this cluster and pool, no pending capacity/recovery/replacement operation, and no active Resource Manager job.
 - Saved operator image matching Terraform state, explicit worker image matching the current node-pool image, and the same desired worker count in the stack and pool. Pool-wide cycling must be disabled.
 - Kubernetes node identity must map to an ACTIVE OCI instance in this managed pool. The tool will not select a destructive target by IP address alone. Kubernetes Ready is not required for preview, but a missing/unidentifiable Kubernetes node requires administrator diagnosis outside this workflow.
 - Stop application controllers targeting the worker and safely remove their workloads first. The tool requires the selected node to be application-idle. Only completed pods and verified kube-system DaemonSets are exempted. All resource claims and claim templates, including pending claims elsewhere in the cluster, block replacement. Do not delete live application claims just to bypass this check.
 - Pause changes made outside this tool, including Resource Manager applies and OKE node cycling. The local lock does not lock the OCI Console or another administrator's session.
-- The operator's existing capacity IAM remains required.  It does not grant an unrestricted delete-node-pool action. The existing instance/network permissions used by managed-pool operations remain necessary.
+- The operator’s existing capacity IAM remains required. Replacement adds a pool-scoped `manage cluster-node-pools` statement limited to `request.operation = 'DeleteNode'`, plus compartment-scoped `read cluster-work-requests`. It doesn’t allow deleting the node pool. The existing instance/network permissions used by managed-pool operations remain necessary.
 
-For an existing deployment, regenerate and review the policy files with `provisioning/capacity-policy.py` (also included as `capacity-policy.py` in the application update). Follow `docs/CAPACITY.md` for the complete command and policy installation procedure. This generator writes reviewable JSON; it does not apply IAM changes. Update the existing policy deliberately with your administrator. An application-only update does not install IAM. Read access and preview success do not prove mutation permission; OCI checks it at submission. Do not use the new ORM package merely to change IAM without reviewing its full plan, because its new payload can replace the operator.
+For an existing deployment, regenerate and review the policy files with `provisioning/capacity-policy.py`. Follow [capacity management](CAPACITY.md) for the complete command and policy installation procedure. The generator writes JSON for your administrator to review and apply. OCI checks DeleteNode permission when replacement is submitted. Install any required IAM changes before using the application update. Do not use the new ORM package merely to change IAM without reviewing its full plan, because its new payload can replace the operator.
 
 ## UI: diagnose, preview, replace, verify
 
-1. Open **Workers & scaling**, select **Details** for the defective worker, and run **Full RDMA support bundle**. Review the selected PF and current evidence. Recovery assessment is useful for the recognized OCA startup failure; a persistent physical-link problem may need replacement instead.
+1. Open **Workers & scaling**, select **Details** for the defective worker, and run **Full RDMA support bundle**. Review the selected PF and current results. Recovery assessment is useful for the recognized OCA startup failure; a persistent physical-link problem may need replacement instead.
 2. Finish any existing recovery protection. Review the prerequisites above, including workload and claim blockers.
 3. In worker details, select **Preview worker replacement**. Review the exact Kubernetes node name, OCI instance OCID, pinned worker image, intended pool count, findings timestamp, workload list, blockers and temporary protections. A preview lasts five minutes and authorizes no deletion.
 4. Select **Review replacement** and type `REPLACE <your-environment-name>`. The confirmation repeats the worker name and instance identity. The server rechecks the preview, worker UID/boot identity, pool membership, image/settings and stack state.
-5. The tool cordons the selected worker and verifies admission protection. New pods/bindings targeting that worker and new claims/templates cluster-wide are temporarily denied. It then makes one OKE DeleteNode request with pool decrement **false**, eviction grace **60 minutes**, and forced termination **false**. OKE performs its managed drain and respects eviction/disruption constraints. Expect temporary loss of one worker's capacity; this is not surge replacement.
-6. In **Workers & scaling**, use **Resume / verify replacement** to observe progress. The retained panel stays visible after the old node disappears. Each click performs a bounded observation/verification attempt; the tool does not continuously poll OCI after the job finishes. A request/check completing is not the same as replacement success.
+5. The tool cordons the selected worker and verifies admission protection. New pods/bindings targeting that worker and new claims/templates cluster-wide are temporarily denied. It then makes one OKE DeleteNode request with pool decrement **false**, eviction grace **60 minutes**, and forced termination **false**. OKE performs its managed drain and respects eviction/disruption constraints. Expect temporary loss of one worker’s capacity during replacement.
+6. In **Workers & scaling**, use **Resume / verify replacement** to observe progress. The retained panel stays visible after the old node disappears. Each click checks progress and verifies the worker. Resume again if the operation is still pending; look for **COMPLETE / Verified** before using the replacement.
 7. Resume identifies exactly one new ACTIVE instance while preserving all original surviving members. It checks the new Kubernetes identity, Ready/schedulable state, host readiness (selected PF/carrier/MTU, OCA-configured address, shared RDMA, NRI), Dranet/device publication, and then runs a quick cross-node validation against a healthy free peer. Readiness can take time; resume later when OCI/bootstrap progresses.
-8. Only **COMPLETE / Verified** means the functional test passed. The new instance ID, worker name, work-request ID, host evidence, test result and timeline remain in the replacement evidence. Operation summaries are included in the support bundle. Download the underlying host reports separately for full diagnostic output.
+8. Only **COMPLETE / Verified** means the functional test passed. The new instance ID, worker name, work-request ID, host-check results, test result and timeline remain in the replacement record. Operation summaries are included in the support bundle. Download the underlying host reports separately for full diagnostic output.
 
 The admission guard is removed when the old OCI and Kubernetes identities have left, so it cannot obstruct bootstrap if a name is reused. The application mutation lock remains until verification succeeds or the operation is safely closed.
 
@@ -35,8 +37,8 @@ The admission guard is removed when the old OCI and Kubernetes identities have l
 | WAITING_FOR_OCI | OCI is draining or replacing the instance. Resume later and inspect the recorded work request. No forced termination is attempted. |
 | OCI_FAILED | OKE reported failure/cancellation. Inspect OCI work-request errors. Close is permitted only when the original pool membership is ACTIVE and stable, or an already identified replacement has safely released protection. |
 | VERIFYING_NODE | The new instance exists; registration/readiness may still be pending. |
-| DEVICE_PENDING | Host checks passed but Dranet/device publication is not ready. Inspect the evidence. If setup changes are needed, close for manual review, then repair/validate through normal setup. |
-| RDMA_FAILED | Replacement exists but host or cross-node testing failed. Evidence is retained. The tool does not automatically replace it again. |
+| DEVICE_PENDING | Host checks passed but Dranet/device publication is not ready. Inspect the results. If setup changes are needed, close for manual review, then repair/validate through normal setup. |
+| RDMA_FAILED | Replacement exists but host or cross-node testing failed. Results are retained. The tool does not automatically replace it again. |
 | FUNCTIONAL_TEST_PENDING | No suitable free second worker is available. Host/device checks alone do not establish cross-node RDMA. |
 | CLOSED | Safely released for manual review, not successful RDMA verification. |
 | COMPLETE | New identity, host, device and cross-node verification passed. |
@@ -54,7 +56,7 @@ api POST /api/v1/jobs '{"action":"replacement_preview","node_name":"10.70.1.89",
 api GET /api/v1/jobs
 ```
 
-Replace the worker/environment examples with your actual values. Wait for the preview job to finish, review its entire result and copy its 32-character `result.id`. Substitute it for `PREVIEW_ID` below; the literal placeholder will be rejected:
+Replace the worker/environment examples with your values. Wait for the preview job to finish, review its entire result and copy its 32-character `result.id`. Substitute it for `PREVIEW_ID` below; the literal placeholder will be rejected:
 
 ```bash
 api POST /api/v1/jobs '{"action":"replacement_run","replacement_id":"PREVIEW_ID","confirmation":"REPLACE hpc-oke-rdma"}'
@@ -83,19 +85,18 @@ Sources: [OKE termination and replacement](https://docs.oracle.com/en-us/iaas/Co
 Run host readiness before replacing a worker whenever it can still run diagnostic pods.
 The check records the OCI instance ID, Kubernetes UID and boot ID, DMI product serial,
 and selected PF MAC. Open worker Details to see the serial, MAC and matches against
-previous instance IDs. 
+previous instance IDs.
 Missing serials appear as Not collected; they are never treated as matching identities.
 
 Replacement preview retains this baseline. Resume records the new host observation and
 shows the comparison even when RDMA checks fail. A serial match reports reuse of the
-recorded server identity. A MAC-only match is suggestive, not conclusive. A different
-identity does not prove working RDMA. Host, device and cross-node verification remain
-required for COMPLETE. No replacement or repair is automatically triggered by a match.
+recorded server identity. A MAC-only match needs further investigation. Host, device and cross-node checks must pass
+before the operation reaches COMPLETE, whatever the identity comparison shows. No replacement or repair is automatically triggered by a match.
 
 History is local to the operator in hardware-history.json, retained through RDMA setup
-reset, and bounded to the most recent 1,000 instance/boot observations. Each observation
+reset, and limited to the most recent 1,000 instance/boot observations. Each observation
 retains up to ten prior matches in its readiness result. Rebuilding or losing the operator
 without preserving its state loses this history. Historical identities cannot be recovered
-from a deleted worker; collect a baseline first. Support evidence contains infrastructure
+from a deleted worker; collect a baseline first. Support reports contain infrastructure
 identifiers, so review it before sharing. Hardware identity is collected by host readiness;
 other standalone diagnostic profiles do not populate the retained history.

@@ -38,7 +38,7 @@ In the Resource Manager stack form:
 
 Use the image imported into the deployment region. The Frankfurt download location does not supply an image OCID for your tenancy. If deploying in another region, import there and record that region's image OCID.
 
-Keep this OCID pinned for subsequent scaling. Review the Terraform Plan before Apply; a worker-count change should not unintentionally change images. After provisioning, run host readiness and cross-node RDMA validation—successful image import alone does not establish RDMA health.
+Keep this OCID pinned for subsequent scaling. Review the Terraform Plan before Apply; a worker-count change should not unintentionally change images. After provisioning, run host readiness and cross-node RDMA validation.
 
 Return to [provisioning](../README.md#2-build-the-resource-manager-zip).
 

@@ -16,6 +16,8 @@ Start with the [provisioning summary](../README.md), then choose a guide below.
 | Scale workers | [Capacity](CAPACITY.md) |
 | Recover or replace a worker | [Recovery](RECOVERY.md) · [Replacement](REPLACEMENT.md) |
 | Interpret benchmarks | [Performance](PERFORMANCE.md) |
+| Monitor health, drift and alerts | [Monitoring](MONITORING.md) |
+| Test partial-scale reconciliation | [Existing-cluster test](TESTING-CAPACITY.md) |
 | Manage operations and shutdown | [Operations](OPERATIONS.md) |
 | Understand the design | [Architecture](ARCHITECTURE.md) |
 | Develop and package | [Development](DEVELOPMENT.md) |

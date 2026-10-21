@@ -46,6 +46,8 @@ for unit in ['sriov-config.service', 'sriov-config-post-network.service']:
     units[unit] = p.stdout.strip() or 'not-found'
 facts = {'system_serial': read('/sys/class/dmi/id/product_serial'), 'hostname': socket.gethostname(), 'boot_id': read('/proc/sys/kernel/random/boot_id'),
          'netns': run('rdma','system','show').strip(), 'rdma_links': run('rdma','link','show'),
+         'ofed_version': optional('ofed_info', '-s'),
+         'oca_version': optional('snap', 'list', 'oracle-cloud-agent'),
          'nri_socket': nri, 'interfaces': interfaces, 'sriov_boot_units': units}
 print('DRANET_FACTS=' + json.dumps(facts))
 DRANET_HOST_PY

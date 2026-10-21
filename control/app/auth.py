@@ -26,3 +26,13 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
     expected = _expected_token()
     if not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_metrics_token(authorization: str | None = Header(default=None)) -> None:
+    path = Path(os.environ.get('HPC_CONTROL_METRICS_TOKEN_FILE', '/etc/oke-rdma-control/metrics.token'))
+    if path.exists():
+        try: expected = path.read_text().strip()
+        except OSError: expected = ''
+        supplied = authorization[7:].strip() if authorization and authorization.startswith('Bearer ') else ''
+        if expected and supplied and hmac.compare_digest(supplied, expected): return
+    require_token(authorization)

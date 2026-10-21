@@ -20,7 +20,7 @@ The ORM package carries the application payload and pinned chart. Bootstrap down
 
 Pin the operator using **Advanced operator VM → Approved operator image override**. The form displays image names and stores the chosen OCID. Direct Terraform uses the explicit `operator_image_ocid` variable. Select the approved worker image independently. Do not change either image as part of a worker-count-only operation.
 
-Build the test tools image on the operator **after** provisioning. Follow [image and registry setup](IMAGE-PULL-SECRET.md). It is a separate container image, not the operator or worker VM image.
+Build the test tools image on the operator **after** provisioning. Follow [image and registry setup](IMAGE-PULL-SECRET.md). This container supplies the diagnostic and benchmark tools; the operator and worker VM images are selected during provisioning.
 
 ## Restricted Kubernetes access
 
@@ -45,14 +45,14 @@ kubectl get deviceclass dra.net
 kubectl get resourceslices
 ```
 
-Run each command only after the previous one succeeds. Refresh discovery in the Control Center and run the quick pair test. Successful manual installation is not itself a recorded functional-test pass.
+Run each command only after the previous one succeeds. Refresh discovery in the Control Center and run the quick pair test. Record a passing quick pair test after manual installation.
 
 ## Provisioning checkpoints
 
-| Checkpoint | Evidence |
+| Checkpoint | Expected result |
 | --- | --- |
 | Infrastructure | Successful Resource Manager Apply and expected outputs |
-| Operator bootstrap | Active `oke-rdma-control` service and successful `oke-rdma-doctor` checks |
+| Operator bootstrap | Active `oke-rdma-control-api.service` and `oke-rdma-control-worker.service` services and successful `oke-rdma-doctor` checks |
 | Kubernetes | Intended workers registered and Ready |
 | Host | Successful inventory and no host readiness blockers |
 | Driver | Ready Dranet pods and valid published devices |

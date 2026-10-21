@@ -58,3 +58,18 @@ def test_registry_prompt_works_in_a_terminal_without_exposing_password(tmp_path)
         assert (tmp_path/'rdma-workloads.json').exists()
         assert (tmp_path/'oke-rdma-diagnostics.json').exists()
     finally:os.close(fd)
+
+
+def test_documented_service_names_match_bootstrap():
+    template=(ROOT/'terraform/operator/cloud-init.sh.tftpl').read_text()
+    for name in ['OPERATOR-VM.md','TROUBLESHOOTING.md']:
+        text=(ROOT/'docs'/name).read_text()
+        for unit in re.findall(r'oke-rdma-control(?:-[a-z]+)?(?:\.service)?',text):
+            if unit.endswith('.service'):assert unit in template
+        assert 'status oke-rdma-control --' not in text
+
+
+def test_embedded_image_recipe_matches_dockerfile():
+    text=(ROOT/'docs/IMAGE-PULL-SECRET.md').read_text()
+    recipe=re.search(r"<<'DOCKERFILE'\n(.*?)\nDOCKERFILE",text,re.S).group(1)
+    assert recipe.strip()==(ROOT/'workloads/rdma-tools/Dockerfile').read_text().strip()

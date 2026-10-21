@@ -45,7 +45,7 @@ def _packager():
 def test_source_archive_excludes_local_state_and_generated_inputs(tmp_path):
     import zipfile
     packager = _packager()
-    safe = ['README.md', 'VERSION', 'control/app/main.py', 'control/vendor/lock.json',
+    safe = ['README.md', 'docs/oci-hpc-arc.png', 'VERSION', 'control/app/main.py', 'control/vendor/lock.json',
             'terraform/main.tf', 'terraform/.terraform.lock.hcl', '.github/workflows/ci.yml']
     private = ['pytest-of-root/pytest-1/control.db', '.test-state/rdma.json', '.demo/control.db',
                'terraform/terraform.tfvars', 'terraform/prod.auto.tfvars', 'terraform/override.tf',

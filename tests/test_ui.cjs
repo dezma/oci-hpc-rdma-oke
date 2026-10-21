@@ -15,7 +15,8 @@ w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialog
 w.URL.createObjectURL=()=> 'blob:test';w.URL.revokeObjectURL=()=>{};
 w.fetch=async(url,opt={})=>{requests.push([url,opt]);if(holds.has(url))await holds.get(url);let data={};
 if(url==='/api/v1/capacity/connection'&&connectionFailure)return {ok:false,status:502,json:async()=>({detail:{message:'Stack does not own this cluster.',field:'stack_id',code:'stack_ownership',next_action:'Use its provisioning stack.'}})};
-if(url==='/api/v1/capacity')data=capacity;
+if(url==='/api/v1/monitoring')data={config:{enabled:false,refresh_idle_hosts:false,nightly_pair:false,interval_seconds:900,stale_seconds:7200,nightly_hour_utc:1,notification_topic:'',maintenance_until:0,claim_age_seconds:86400},snapshot:{},baseline:null};
+else if(url==='/api/v1/capacity')data=capacity;
 else if(url.startsWith('/api/v1/capacity/readiness?'))data={target:Number(url.split('=')[1]),checked_at:Date.now()/1000,can_plan:true,capacity_report:{shape:'BM.Optimized3.36',region:'eu-frankfurt-1',checked_at:100},checks:[{name:'OCI scale-up capacity report',status:'pass',detail:'AD1: AVAILABLE; count Not disclosed'},{name:'Ownership',status:'pass',detail:'Verified'},{name:'Write IAM',status:'unverified',detail:'Not proven by read access'}]};
 else if(url==='/api/v1/capacity/connection'){capacity.configured=true;capacity.stack_id=JSON.parse(opt.body).stack_id;capacity.desired=3;capacity.ready=3;data={saved:true};}
 else if(url==='/api/v1/reset-plan')data={can_reset:!resetBlocked,plan_id:'0'.repeat(64),targets:[{kind:'DaemonSet',namespace:'kube-system',name:'dranet'}],local_files:['host-readiness.json'],retained:['Terraform infrastructure','Pull secrets'],blockers:resetBlocked?['Application claim in use']:[]};
@@ -183,6 +184,15 @@ assert.match(el('#capacity-operation').textContent,/not rolled back/);
 assert.doesNotMatch(el('#capacity-operation').textContent,/Operation finished/);
 assert.equal(el('#capacity-target').disabled,false);
 assert.equal(el('#capacity-plan').textContent,'Generate reconciliation plan');
+assert.equal(el('#monitoring-form button[type=submit]').disabled,false);
+el('#monitoring-enabled').checked=true;el('#monitoring-confirm').value='test-hpc';
+el('#monitoring-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await tick();
+const savedMonitoring=requests.find(([u,o])=>u==='/api/v1/monitoring'&&o.method==='PUT');
+assert(savedMonitoring);assert.equal(JSON.parse(savedMonitoring[1].body).enabled,true);
+assert.equal(JSON.parse(savedMonitoring[1].body).confirmation,'test-hpc');
+click('#monitoring-run');assert.match(el('#confirm-title').textContent,/Monitoring health/);click('#cancel-confirm');
+el('#monitoring-baseline-node').value='worker-10';click('#monitoring-baseline');
+assert.match(el('#confirm-copy').textContent,/worker-10/);click('#cancel-confirm');
 assert.equal(errors.length,0);click('#logout');assert.equal(el('#login').hidden,false);
 console.log('UI DOM smoke: onboarding, real phase progress, completion, latency, prerequisites, login, configuration, readiness, node details, filtering, events, confirmation, inline jobs, duplicate prevention, logout passed.');
 }finally{w.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

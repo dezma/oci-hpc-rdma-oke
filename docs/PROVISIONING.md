@@ -43,7 +43,7 @@ In OCI Console, select the intended region. Use Console search to find **Compart
 
 | Input | Where to obtain it / what to choose |
 | --- | --- |
-| Tenancy OCID | Tenancy details; the tenancy name alone is not an OCID |
+| Tenancy OCID | Copy the identifier beginning with `ocid1.tenancy.` from Tenancy details |
 | Deployment compartment OCID | Identity & Security → Compartments → chosen project compartment |
 | Region and AD | Region selector and the stack placement dropdown; use the same placement for compatible workers |
 | Environment name | A unique descriptive prefix, such as `hpc-oke-rdma`; used in confirmations |
@@ -57,7 +57,7 @@ In OCI Console, select the intended region. Use Console search to find **Compart
 | Registry identity | OCIR repository, user permitted to push/pull, and that user's OCI auth token |
 | IAM ownership | Which group/policies already exist and which the stack is permitted to create |
 
-Keep private keys, auth tokens and the UI admin token out of shared worksheets and support bundles. OCIDs and resource names identify resources; they are not substitutes for credentials.
+Keep private keys, auth tokens and the UI admin token out of shared worksheets and support bundles.
 
 ### If you do not have tenancy administrator access
 
@@ -104,7 +104,7 @@ sudo cat /etc/oke-rdma-control/admin.token
 
 8. Enter it in the browser and select **Open workspace**. Verify the environment name.
 
-A session expiry requires a new Bastion session and connection, not a new cluster. Keep port 8000 private. Do not copy your private SSH key onto the operator.
+When a session expires, create a new Bastion session and reconnect. Keep port 8000 private. Do not copy your private SSH key onto the operator.
 
 **Checkpoint:** operator SSH works; UI users can log in. Continue with [UI setup](UI.md) or [terminal setup](OPERATOR-VM.md).
 

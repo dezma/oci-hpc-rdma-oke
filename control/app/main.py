@@ -9,7 +9,7 @@ import time
 from . import dranet
 from fastapi.staticfiles import StaticFiles
 
-from .auth import require_token
+from .auth import require_token, require_metrics_token
 from .config import load_settings, save_rdma_config
 from .db import enqueue, get_job, init_db, list_jobs
 from .jobs import validate_request
@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 init_db()
 
-app = FastAPI(title="OKE RDMA Control Center", version="2.9.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="OKE RDMA Control Center", version="2.10.0", docs_url=None, redoc_url=None)
 
 
 @app.exception_handler(ProviderError)
@@ -365,3 +365,18 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+
+from .monitoring import Monitoring, MonitoringConfig, metrics as monitoring_metrics
+
+@app.get('/api/v1/monitoring', dependencies=[Depends(require_token)])
+def monitoring_status():
+    return Monitoring(get_provider(load_settings())).status()
+
+@app.put('/api/v1/monitoring', dependencies=[Depends(require_token)])
+def monitoring_config(req: MonitoringConfig):
+    return Monitoring(get_provider(load_settings())).save_config(req)
+
+@app.get('/metrics', dependencies=[Depends(require_metrics_token)])
+def prometheus_metrics():
+    return Response(monitoring_metrics(get_provider(load_settings())), media_type='text/plain; version=0.0.4')

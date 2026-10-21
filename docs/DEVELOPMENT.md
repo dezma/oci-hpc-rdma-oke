@@ -2,7 +2,7 @@
 
 ## Build environment
 
-Use Linux x86_64, Python 3.11+, Node.js 22, Terraform 1.5.7, `curl`, `tar`, and `sha256sum`. A Linux x86_64 development container is suitable. The operator payload targets Oracle Linux 9 x86_64 and Python 3.11, independent of the builder's Python version.
+Use Linux x86_64, Python 3.11+, Node.js 22, Terraform 1.5.7 or later, `curl`, `tar`, and `sha256sum`. A Linux x86_64 development container is suitable. The operator payload targets Oracle Linux 9 x86_64 and Python 3.11, independent of the builder's Python version.
 
 From the repository root:
 
@@ -37,7 +37,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 python -m app.worker
 ```
 
-Open `http://127.0.0.1:8000` and enter `demo`. Sample inventory is explicitly labelled; actions simulate workflow state and never change OCI resources or report measured throughput. Use separate paths for demo state and any live configuration.
+Open `http://127.0.0.1:8000` and enter `demo`. Sample inventory is labelled; actions simulate workflow state and never change OCI resources or report measured throughput. Use separate paths for demo state and any live configuration.
 
 ## Release archives
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 from .config import Settings
 from .provider import get_provider
 
-MUTATING = {'replacement_preview','replacement_run','replacement_resume','replacement_close','recovery_restart_assess', 'recovery_assess', 'recovery_run', 'recovery_finish', 'check_hosts', 'install_dranet', 'rdma_validation', 'cleanup_validation', 'node_diagnostic', 'reset_rdma', 'capacity_plan', 'capacity_apply', 'capacity_discard', 'capacity_resume', 'capacity_close'}
+MUTATING = {'monitoring_sweep','monitoring_baseline','replacement_preview','replacement_run','replacement_resume','replacement_close','recovery_restart_assess', 'recovery_assess', 'recovery_run', 'recovery_finish', 'check_hosts', 'install_dranet', 'rdma_validation', 'cleanup_validation', 'node_diagnostic', 'reset_rdma', 'capacity_plan', 'capacity_apply', 'capacity_discard', 'capacity_resume', 'capacity_close'}
 
 
 def validate_request(settings: Settings, action: str, confirmation: str):
@@ -20,6 +20,12 @@ def execute(settings, action, payload=None, job_id=''):
     from .recovery import Recovery, guard
     guard(action)
     provider.capacity_service().guard(action)
+    if action.startswith('monitoring_'):
+        from .monitoring import Monitoring
+        monitor = Monitoring(provider)
+        if action == 'monitoring_baseline': return monitor.approve_baseline(payload.get('node_name',''))
+        if payload.get('scheduled') and not monitor.config()['enabled']: return {'status':'skipped','message':'Monitoring disabled after scheduling.'}
+        return monitor.benchmark() if action == 'monitoring_benchmark' else monitor.sweep()
     if action.startswith('replacement_'):
         from .replacement import Replacement
         replacement = Replacement(provider)

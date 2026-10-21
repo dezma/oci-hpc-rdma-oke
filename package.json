@@ -1,6 +1,6 @@
 {
   "name": "oke-hpc-control-center",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "private": true,
   "scripts": {
     "test:ui": "node tests/test_ui.cjs"

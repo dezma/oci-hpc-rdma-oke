@@ -2,19 +2,21 @@
 
 Provision a private OCI Kubernetes environment for CPU RDMA workloads, then configure and validate it through the UI or operator VM.
 
-![hpc arc](docs/oci-hpc-arc.png)
+![Architecture of the private OKE HPC environment](docs/oci-hpc-arc.png)
+
+The diagram illustrates the topology. See [architecture details](docs/ARCHITECTURE.md#reading-the-diagram) for the deployed services and subnet defaults.
 
 ## 1. Prepare
 
-Have your OCI compartment, region/availability domain, SSH key pair and required [IAM permissions](docs/IAM.md) ready. [Import an Ubuntu 24.04 or 22.04 HPC worker image](docs/CUSTOM-IMAGES.md) and select an approved operator image and start with **two workers** for cross-node testing. Provisioned resources incur OCI charges.
+Have your OCI compartment, region/availability domain, SSH key pair and required [IAM permissions](docs/IAM.md) ready. [Import an Ubuntu 24.04 or 22.04 HPC worker image](docs/CUSTOM-IMAGES.md) and select an approved operator image. Start with **two workers** for cross-node testing. Provisioned resources incur OCI charges.
 
 ## 2. Build the Resource Manager ZIP
 
-On Linux or WSL, install Git, Python 3, Bash, `curl`, `tar` and `sha256sum`. Replace the repository URL below, then run:
+On Linux or WSL, install Git, Python 3, Bash, `curl`, `tar` and `sha256sum`. Run:
 
 ```bash
 git clone https://github.com/dezma/oci-hpc-rdma-oke.git
-cd YOUR-REPOSITORY
+cd oci-hpc-rdma-oke
 chmod +x provisioning/*.sh control/bootstrap/*.sh
 bash provisioning/build-orm.sh
 (cd dist && sha256sum -c SHA256SUMS)
@@ -55,5 +57,6 @@ On the **operator VM**, follow [image and registry setup](docs/IMAGE-PULL-SECRET
 
 In **Setup & validation**, save the image digest and RDMA settings, check hosts, enable Dranet, and run the quick cross-node test. Once validation passes, download the workload YAML and use it to deploy your workload.
 
-Follow the [UI guide](docs/UI.md) or [operator VM guide](docs/OPERATOR-VM.md)) for these operations. If a step fails, start with [troubleshooting](docs/TROUBLESHOOTING.md).
+Follow the [UI guide](docs/UI.md) or [operator VM guide](docs/OPERATOR-VM.md) for these operations. If a step fails, start with [troubleshooting](docs/TROUBLESHOOTING.md).
 
+For ongoing health checks and alerts, enable [monitoring](docs/MONITORING.md) after validation passes. See the [documentation index](docs/README.md) for all guides.

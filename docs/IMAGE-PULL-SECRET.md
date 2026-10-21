@@ -2,13 +2,12 @@
 
 **Where:** operator VM, signed in as `opc`. **Before you start:** complete [deployment and access](../README.md). You need a working operator shell, permission to push an OCIR image, and an OCI auth token. UI and terminal users both complete this procedure once.
 
-An image is the software inside the test containers. A Dockerfile is its build recipe. Pushing uploads the built image to OCIR. The immutable digest identifies its exact contents. A pull secret gives Kubernetes permission to download it. These are separate steps; creating a Dockerfile or logging Podman in does not complete the rest.
+An image is the software inside the test containers. A Dockerfile is its build recipe. Pushing uploads the built image to OCIR. The immutable digest identifies its exact contents. A pull secret gives Kubernetes permission to download it. Complete the build, verification, push and secret creation in that order.
 
 Keep one SSH session open throughout this page. Commands use Bash variables set in earlier steps. If reconnecting, set those variables again. Run commands individually and stop if a command fails.
 
 
-
-An image pull secret is a Kubernetes object containing registry credentials. `ocir-pull` is the name you choose for that object. It is not an OCI image OCID, a token supplied by this tool, or the Control Center login token. This walkthrough builds and publishes the tools image on the operator VM, then creates the secrets that let workers pull it. Complete the steps in order. You can prepare everything with zero workers; testing an actual worker pull needs workers later.
+The Kubernetes secret `ocir-pull` stores the registry credentials used by workers. This walkthrough builds and publishes the tools image on the operator VM, then creates the secrets that let workers pull it. Complete the steps in order. You can prepare everything with zero workers; testing an worker pull needs workers later.
 
 ### 1. Create or select the OCIR repository
 
@@ -16,8 +15,8 @@ Open OCI Console → Developer Services → Containers & Artifacts → Container
 
 | Prompt | What to enter | Where to get it |
 |---|---|---|
-| Registry host | `fra.ocir.io` in this example | Everything before the first slash in your actual tools-image reference; no `https://`, repository path or digest |
-| Registry username | `<tenancy-namespace>/<username>`; for federated identities, `<tenancy-namespace>/<domain-name>/<username>` | Object Storage namespace from Tenancy Information, and the actual identity/domain shown in your profile |
+| Registry host | `fra.ocir.io` in this example | Everything before the first slash in your tools-image reference; no `https://`, repository path or digest |
+| Registry username | `<tenancy-namespace>/<username>`; for federated identities, `<tenancy-namespace>/<domain-name>/<username>` | Object Storage namespace from Tenancy Information, and the identity/domain shown in your profile |
 | Registry auth token/password | The registry user's OCI auth token | Generate it as described below; do not use your Console password or API signing key |
 
 For example, a federated username might be `exampletenancy/oracleidentitycloudservice/alice@example.com`. This is only an example: do not assume that your domain is `oracleidentitycloudservice` or `Default`. Use the identity format configured for your account. The tenancy namespace is not the tenancy OCID or Kubernetes namespace. The build user needs permission to push images to this repository. The user placed in the Kubernetes pull secret needs permission to read it. For a simple lab these can be the same user; for production prefer a separate read-only pull identity. Ask your tenancy administrator for these permissions before proceeding. The operator VM's instance-principal permissions do not automatically grant that user repository access.
@@ -136,7 +135,7 @@ kubectl -n rdma-workloads get secret ocir-pull
 kubectl -n oke-rdma-diagnostics get secret ocir-pull
 ```
 
-`NotFound` means it must be created in that namespace. `Forbidden` means your Kubernetes access needs fixing; creating a new token will not solve it. With zero workers, `get nodes` can legitimately return no resources, and you can still create secrets. An existing secret's presence does not prove that its token remains valid. Do not dump its YAML or decode its data just to check it exists.
+`NotFound` means it must be created in that namespace. `Forbidden` means your Kubernetes access needs fixing; creating a new token will not solve it. With zero workers, `get nodes` can return no resources. You can still create secrets, then verify their credentials with a worker pull after scaling up. Do not dump its YAML or decode its data just to check it exists.
 
 ### 8. Create or rotate the pull secret in both namespaces
 
@@ -156,10 +155,10 @@ Before running the Python block, prepare these three values:
 | Prompt | What to enter | Example / where to find it |
 | --- | --- | --- |
 | Registry host (no https, e.g fra.ocir.io) | Only the hostname before the first slash in your tools-image reference. No scheme, repository path or digest. | For `fra.ocir.io/fr9qm01oq44x/oke-rdma/rdma-tools@sha256:…`, enter `fra.ocir.io`. |
-| Registry username (namespace/[domain/]username) | Your tenancy Object Storage namespace, followed by the registry user's identity. Include its identity domain where applicable; brackets are explanatory, not literal. | `fr9qm01oq44x/alice` or `fr9qm01oq44x/Default/alice@example.com`. Use your actual namespace and profile identity, not these example users. The namespace is not the tenancy display name or OCID. |
+| Registry username (namespace/[domain/]username) | Your tenancy Object Storage namespace, followed by the registry user's identity. Include its identity domain where applicable; brackets are explanatory, not literal. | `fr9qm01oq44x/alice` or `fr9qm01oq44x/Default/alice@example.com`. Use your namespace and profile identity, not these example users. The namespace is not the tenancy display name or OCID. |
 | Registry auth token/password | An OCI **auth token belonging to that user**. It is used as the registry password. | In OCI Console, open the user's details → Auth tokens → Generate token (or obtain one through your identity administrator). Copy it when generated; input is hidden. Do not use the Console password, API private key or Kubernetes token. |
 
-The user must have permission to read the image repository. A successful secret apply stores credentials; **it does not validate OCIR login**. A subsequent diagnostic pull verifies that the worker can use them. Operator `podman login` alone does not configure the Kubernetes pull secret.
+The user must have permission to read the image repository. After storing the credentials, run a diagnostic pull to verify worker access. Podman and Kubernetes each need their own credential setup.
 
 ```bash
 python3 - <<'PY'
@@ -178,7 +177,7 @@ if not registry or not username or not password:
 if '://' in registry or '/' in registry or any(c.isspace() for c in registry):
     raise SystemExit('Registry host must be a hostname only, for example fra.ocir.io')
 if '/' not in username or username.startswith('/') or username.endswith('/'):
-    raise SystemExit('Use namespace/[domain/]username with your actual OCIR identity')
+    raise SystemExit('Use namespace/[domain/]username with your OCIR identity')
 auth = base64.b64encode((username + ':' + password).encode()).decode()
 config = json.dumps({'auths': {registry: {'auth': auth}}}).encode()
 encoded = base64.b64encode(config).decode()
@@ -193,14 +192,14 @@ for namespace in ('rdma-workloads', 'oke-rdma-diagnostics'):
 PY
 ```
 
-Expected output is a successful `secret/ocir-pull` apply message for each namespace. If server-side apply reports field ownership conflicts, reconcile with the existing secret owner; do not blindly force conflicts. A failure on the second namespace can leave the first updated: fix the error and rerun deliberately.
+Expected output is a successful `secret/ocir-pull` apply message for each namespace. If server-side apply reports field ownership conflicts, reconcile with the existing secret owner; do not blindly force conflicts. A failure on the second namespace can leave the first updated: fix the error and rerun.
 
 ### 9. Save the image reference and secret name, then verify
 
 1. Open **Setup & validation** → workload configuration.
 2. Copy the complete value from `cat "$HOME/rdma-tools-build/rdma-tools-image-reference.txt"` into the tools-image field.
 3. In **Existing image pull secret**, enter exactly `ocir-pull`. Enter only the name, never the token. Save the configuration.
-4. Save. Terminal-only users can use the authenticated API helper and configuration request in the [operator guide](OPERATOR-VM.md), using this same image reference and `rdma_image_pull_secret` value `ocir-pull`.
+4. Terminal-only users can use the authenticated API helper and configuration request in the [operator guide](OPERATOR-VM.md), using this same image reference and `rdma_image_pull_secret` value `ocir-pull`.
 5. Confirm both objects without exposing credentials:
 
 ```bash
@@ -215,7 +214,7 @@ kubectl -n oke-rdma-diagnostics get events --sort-by=.metadata.creationTimestamp
 kubectl -n rdma-workloads get events --sort-by=.metadata.creationTimestamp
 ```
 
-A successful container start alone may use a cached image; a `Pulled` event indicating an actual successful download provides stronger evidence of working registry access. Secret creation while scaled to zero cannot validate a worker pull.
+Check for a `Pulled` event reporting a successful download when verifying registry access. A cached image can start without downloading. With zero workers, complete this check after scaling up.
 
 | Symptom | What to check next |
 |---|---|
@@ -226,7 +225,7 @@ A successful container start alone may use a cached image; a `Pulled` event indi
 | `ImagePullBackOff` | Read the detailed preceding pull event; this is a retry state, not the root cause |
 | Secret exists but warning continues | Refresh events and inspect the newest pod attempt; old events remain in history |
 
-For a genuinely public image that needs no credentials, leave the UI secret field empty. When rotating credentials, update both namespaces, verify new pulls, and only then revoke the old token. Replacing the operator VM normally preserves secrets stored in the existing Kubernetes cluster; check them before generating new credentials.
+For a public image that needs no credentials, leave the UI secret field empty. When rotating credentials, update both namespaces, verify new pulls, and only then revoke the old token. Replacing the operator VM normally preserves secrets stored in the existing Kubernetes cluster; check them before generating new credentials.
 
 Sources: [Oracle: generate an auth token](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionsgenerateauthtokens.htm), [Oracle: registry login identity format](https://docs.oracle.com/en-us/iaas/Content/Functions/Tasks/functionslogintoocir.htm), [Oracle: Kubernetes registry pulls](https://docs.oracle.com/en-us/iaas/Content/Registry/Tasks/registrypullingimagesfromocir.htm).
 

@@ -58,7 +58,7 @@ class LiveProvider(BaseProvider):
         path = STATE_DIR / 'host-readiness.json'
         return json.loads(path.read_text()) if path.exists() else {}
 
-    def check_hosts(self, node_names=None):
+    def check_hosts(self, node_names=None, force=False):
         selected = self._selected()
         if node_names is not None: selected = [n for n in selected if n['metadata']['name'] in node_names]
         if not selected: raise ProviderError('No nodes labelled oci-rdma=true,oke-rdma-mode=dranet. Check the managed RDMA node pool and its initial labels.')
@@ -69,11 +69,11 @@ class LiveProvider(BaseProvider):
         for index, n in enumerate(selected):
             self.report_progress("Checking hosts", index, len(selected), f"Host {index + 1} of {len(selected)}: " + n["metadata"]["name"])
             name = n['metadata']['name']
-            if not self._host_issues(n) and 'hardware_identity' in cache.get(name, {}):
+            if not force and not self._host_issues(n) and 'hardware_identity' in cache.get(name, {}):
                 results.append({'node': name, **cache[name], 'reused': True})
                 continue
             result = self.node_diagnostic(name, 'dranet-readiness', str(uuid.uuid4()))
-            entry = {'at': time.time(), 'facts': result.get('facts', {}), 'reports': result.get('reports', {}), 'findings': result.get('findings', [])}
+            entry = {'at': time.time(), 'collection_status': result.get('collection_status',result['status']), 'facts': result.get('facts', {}), 'reports': result.get('reports', {}), 'findings': result.get('findings', [])}
             entry['issues'] = assess_host(entry['facts'], self.s) if result.get('collection_status', result['status']) == 'passed' else [f['message'] + ' ' + f.get('next_action', '') for f in result.get('findings', []) if f.get('severity') == 'block'] or ['Host inventory collection failed. Review exit status, events and logs in the diagnostic report.']
             from .hardware_identity import identity, record
             entry['hardware_identity'] = record(STATE_DIR / 'hardware-history.json', identity(n, entry['facts'], self._node_instance_id(n), self.s.rdma_pf_name))
@@ -132,7 +132,7 @@ class LiveProvider(BaseProvider):
             ns, name = c['metadata']['namespace'], c['metadata']['name']
             consumers = [p for p in pods if p['metadata']['namespace'] == ns and any(
                 r.get('resourceClaimName') == name for r in p.get('spec', {}).get('resourceClaims', []))]
-            claim_rows.append({'namespace': ns, 'name': name, 'allocated': bool(results),
+            claim_rows.append({'namespace': ns, 'name': name, 'created_at': c['metadata'].get('creationTimestamp'), 'allocated': bool(results),
                                'devices': results, 'reserved_for': c.get('status', {}).get('reservedFor', []),
                                'consumers': [{'name': p['metadata']['name'], 'phase': p.get('status', {}).get('phase'),
                                               'node': p.get('spec', {}).get('nodeName')} for p in consumers]})
@@ -462,7 +462,7 @@ class DemoProvider(LiveProvider):
     def inventory(self): return self.environment()
     def configuration_status(self): return {'installed': False, 'hardware_fields_locked': False, 'network_fields_locked': False}
     def preflight(self): return {'blocking': 0, 'checks': [{'name': 'Demo preview', 'status': 'pass', 'detail': 'No live infrastructure queried.'}]}
-    def check_hosts(self, node_names=None): return {'status': 'simulated', 'message': 'Demo host inventory; no privileged pod created.'}
+    def check_hosts(self, node_names=None, force=False): return {'status': 'simulated', 'message': 'Demo host inventory; no privileged pod created.'}
     def install_dranet(self): return {'status': 'simulated', 'message': 'Demo installation; no cluster changed.'}
     def rdma_validation(self, server_node='', client_node='', performance_profile='quick'): return {'status': 'simulated', 'average_gbps': None, 'message': 'No measurement was taken.'}
     def cleanup_validation(self): return {'status': 'simulated', 'message': 'Demo cleanup; no resources deleted.'}

@@ -22,7 +22,7 @@ def positive(value):
 def summarize(jobs, environment, settings, now=None):
     now = time.time() if now is None else now
     reset = environment.get('reset_at', 0)
-    attempts = sorted([j for j in jobs if j.get('action') == 'rdma_validation' and j.get('requested_at', 0) > reset],
+    attempts = sorted([j for j in jobs if j.get('action') in {'rdma_validation', 'monitoring_benchmark'} and j.get('requested_at', 0) > reset],
                       key=lambda j: j.get('requested_at', 0), reverse=True)
     latest = attempts[0] if attempts else None
     measured = next((j for j in attempts if positive((j.get('result') or {}).get('average_gbps'))), None)

@@ -11,9 +11,9 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PATTERNS = (
     'README.md', 'README-*.md', 'CONTRIBUTING.md', 'SECURITY.md', 'VERSION',
-    'RELEASE.json', 'LICENSE', 'NOTICE', 'Makefile', 'package.json', 'package-lock.json', '.gitignore',
-    '.github/workflows/*.yml', '.github/workflows/*.yaml', 'docs/*.md',
-    'provisioning/*.sh', 'provisioning/*.py', 'tests/*.py', 'tests/*.cjs',
+    'RELEASE.json', 'PROJECT-REVIEW.md', 'MODIFIED-FILES.txt', 'LICENSE', 'NOTICE', 'Makefile', 'package.json', 'package-lock.json', '.gitignore',
+    '.github/workflows/*.yml', '.github/workflows/*.yaml', 'docs/*.md', 'docs/oci-hpc-arc.png',
+    'provisioning/*.sh', 'provisioning/*.py', 'provisioning/operator-update.json', 'tests/*.py', 'tests/*.cjs',
     'control/app/*.py', 'control/validation/*.py', 'control/web/*.html',
     'control/web/*.js', 'control/web/*.css', 'control/requirements.lock',
     'control/runtime-requirements.lock', 'control/bootstrap/*.sh',

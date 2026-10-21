@@ -12,9 +12,19 @@ from .jobs import execute
 
 def main() -> int:
     init_db()
+    next_monitor = 0
     while True:
         job = claim_next()
         if not job:
+            if time.time() >= next_monitor:
+                next_monitor = time.time()+30
+                try:
+                    from .provider import get_provider
+                    from .monitoring import schedule
+                    schedule(get_provider(load_settings()))
+                except Exception:
+                    # The next tick retries; never interrupt the durable worker.
+                    pass
             time.sleep(1.5)
             continue
         job_id = job["id"]

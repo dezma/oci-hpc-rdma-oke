@@ -2,85 +2,67 @@
 
 ## Before running tests
 
-Complete [image and registry setup](IMAGE-PULL-SECRET.md) on the operator VM and save the pushed immutable digest in the configuration. Verify MPI/UCX, SSH tools and numactl are present before pushing. Keep the pull secret configured in both namespaces.
+Complete [image and registry setup](IMAGE-PULL-SECRET.md), verify the image contains MPI/UCX, SSH and `numactl`, and save its pushed digest. Keep the pull secret in both namespaces.
 
-Run host readiness and ensure Dranet devices are valid/free. Stop application traffic on test
-workers for extended profiles. Tests consume exclusive physical NIC claims but do not reserve
-exclusive CPUs. Do not interpret shared CPU contention as proven fabric degradation.
+Run host readiness and check that Dranet devices are valid and free. Stop application traffic on the test workers before extended profiles. NIC claims reserve the RDMA device; CPU contention can still affect results.
 
-## Feature checklist and how to use it
+## Choose a test
 
-| Requested feature | UI workflow | Evidence and limitations |
+| Profile or view | What it measures | Scope |
 | --- | --- | --- |
-| Worker-to-worker matrix | Setup & validation → Measure cross-node RDMA → All free worker pairs | Sequential directional bandwidth and latency for 2–8 free workers. Stops on first failure, preserves returned partial results. Two-hour budget. Untested pairs stay unmeasured. |
-| Regression against baseline | Pair performance and baseline comparison | Earliest comparable retained successful run, percentage changes and recorded versions/settings. A previous run with changed conditions is shown separately as a descriptive reference, never a controlled regression baseline. New node names may have no reference. |
-| Time until usable RDMA | Workers & scaling → capacity operation timeline | Apply submission, apply completion observation, Kubernetes Ready, host RDMA readiness and device readiness. Time to verified capacity requires a successful bandwidth+latency pair run covering each new node UID/boot. Missing historical stages remain unknown. |
-| Latency stability under load | Latency under concurrent RDMA traffic | Idle versus loaded mean, median, p99, p99.9, standard deviation and maximum where perftest exposes them. Positive background traffic and enclosing process intervals are required. Continuous saturation is not established. |
-| Message-size behavior | Message-size sweep | Bandwidth and latency at 8, 64, 512, 4096, 65536 and 1048576 bytes. Reported latency is perftest half RTT, not independently measured one-way latency. |
-| MPI collectives | MPI collectives | Automatic endpoints use up to eight available workers (first eight in discovered order); choosing both endpoints uses that pair. One rank per worker. Allreduce, Alltoall and Barrier; 10 warmups and 100 samples, maximum rank time per sample, mean/p99/max. Sizes: 8, 1024 and 65536 bytes per rank for Allreduce or per peer for Alltoall. |
-| NUMA placement penalty | NUMA local versus remote placement | Both endpoints run bandwidth and latency with a CPU and memory node local to their NIC, then remote. Actual CPU/NUMA bindings are recorded. Reports combined endpoint placement effects, not an isolated memory-latency measurement. |
-| ResourceClaim-to-workload startup | Every validation result → Claim-to-container startup | API creation/scheduling/sandbox/container/Ready timestamps and first observed allocation, sampled every two seconds plus API latency. This is the test container startup, not arbitrary application readiness. |
+| Quick pair check | Bandwidth at 64 KiB and latency at 8 bytes, 5,000 writes each | Two free workers, RDMA-CM, one RC queue pair and the configured traffic class |
+| All free worker pairs | Directional bandwidth and latency across the fleet | Two to eight workers; stops at the first failure or the two-hour limit |
+| Message-size sweep | Bandwidth and latency at 8, 64, 512, 4096, 65536 and 1048576 bytes | Selected pair |
+| Latency under concurrent RDMA traffic | Idle and loaded mean, median, p99, p99.9, standard deviation and maximum, where perftest reports them | Records background traffic and checks that its process spans the latency test; traffic intensity can vary |
+| NUMA local versus remote placement | Bandwidth and latency with CPU and memory near the NIC, then on a remote NUMA node | Records bindings on both endpoints; the difference combines their placement effects |
+| MPI collectives | Allreduce, Alltoall and Barrier timings | One rank per worker; automatic selection uses up to eight free workers, or choose both endpoints for a pair |
+| Pair performance and baseline comparison | Change from the earliest comparable retained successful run | Matching worker identities, versions and test settings are required; runs with different conditions appear separately for reference |
+| Claim-to-container startup | Claim creation/allocation and pod scheduling, sandbox, container and Ready times | Allocation is sampled every two seconds plus API latency |
+| Capacity operation timeline | Apply, worker registration, Kubernetes readiness, host readiness and device publication | Verified-capacity timing also requires passing bandwidth and latency tests covering every new node UID/boot |
+
+MPI runs 10 warmups and 100 samples per collective. Each sample records the slowest rank; results include mean, p99 and maximum. Allreduce uses 8, 1024 and 65536 bytes per rank. Alltoall uses those sizes per peer.
+
+Latency uses perftest's half-round-trip estimate. p99 is the value at or below which 99% of samples fall. Compare results under similar load, placement and configuration. Use application tests to assess whether the fabric meets your workload's needs.
 
 ## Run and interpret the matrix
 
-1. Select **All free worker pairs** and review the confirmation scope. Endpoint selectors do not
-   restrict this profile: it tests all currently free healthy workers (maximum eight).
-2. Run the test. Each direction creates and removes its own pair of pods and ResourceClaims.
-3. Inspect the grid and directional table. Compare bandwidth and latency alongside freshness,
-   profile and baseline conditions. A missing cell is not zero performance.
-4. If a pair fails, inspect that result and run owned validation cleanup if required. Previously
-   completed pairs are retained in the returned job result; an interrupted operator process may
-   lose in-memory partial samples. A new sweep is an explicit new measurement, not an automatic retry.
+1. Select **Setup & validation → Measure cross-node RDMA → All free worker pairs**. This profile uses all eligible free workers, up to eight, regardless of the endpoint selectors.
+2. Review the confirmation and run the test. Each direction creates and removes its own pods and ResourceClaims.
+3. Compare bandwidth and latency alongside the test date, profile and baseline conditions. Blank cells mean the pair wasn’t tested.
+4. If a pair fails, inspect its result and clean up any retained validation resources. Completed pairs remain in the returned result. An operator interruption can lose samples still held in memory. Start a new sweep when ready.
 
 ## MPI launch and transport
 
-MPI uses Open MPI with the UCX PML and UCX_TLS=rc,self,sm. Each rank selects its worker's
-recorded RDMA device; the suite fails if the required UCX transport cannot initialize, rather
-than silently falling back to TCP MPI payload transport. SSH/control-plane traffic uses the
-pod network. The MPI hosts list does not select payload transport.
+MPI uses Open MPI's UCX PML with `UCX_TLS=rc,self,sm`. Each rank selects its worker's recorded RDMA device. Initialization fails if the required UCX transport is unavailable. SSH and MPI control traffic use the normal pod network.
 
-Temporary SSH servers listen only in the owned test pods on port 2222. An ephemeral public key
-is installed only in those pods; the private key remains in the leader pod. Host keys are read
-through the authenticated Kubernetes API, and SSH strict host-key checking remains enabled.
-No worker host SSH access, host filesystem mounts, Kubernetes service-account tokens or host
-networking are introduced. MPI pods add SETUID, SETGID, SYS_CHROOT, CHOWN and DAC_OVERRIDE for
-sshd; they remain non-privileged. The extra capabilities apply only to MPI test pods. Pod-network
-policy must permit pod-to-pod SSH and Open MPI control traffic among test workers.
+Temporary SSH servers listen inside the test pods on port 2222. The leader holds an ephemeral private key; the public key is installed in the test pods. Host keys are retrieved through the authenticated Kubernetes API, and strict SSH host-key checking stays enabled.
 
-Each collective verifies received data where applicable. A successful basic pair benchmark
-with failed MPI remains a failed extended profile, not a successful MPI result. Clean up owned
-validation resources after interruption. Services and pods have bounded deadlines.
+MPI pods add SETUID, SETGID, SYS_CHROOT, CHOWN and DAC_OVERRIDE for `sshd`. They remain non-privileged and use neither host filesystem mounts nor host networking. Network policies must allow pod-to-pod SSH and MPI control traffic among the selected workers.
+
+Each collective checks received data where applicable. An MPI error marks the extended profile failed even if the initial bandwidth test passed. Inspect `extended.error` and `extended.ssh_evidence` as appropriate. After an interruption, use validation cleanup before retrying.
 
 ## NUMA requirements
 
-NUMA pods add SYS_NICE for memory-policy operations. The suite uses the container's allowed
-CPU set and allowed memory nodes and the NIC's sysfs NUMA identity. It must find local and remote
-placements and successfully apply numactl CPU and memory binding. Unknown topology, restricted
-cpusets, missing numactl or denied memory policy returns an explicit test failure; no synthetic
-penalty is reported. Host configuration and affinity are not changed. CPU contention can still
-influence results; repeat tests under comparable load.
+The NUMA profile changes CPU and memory binding inside the test pods. **No BIOS changes are needed.** It uses the allowed CPU set, allowed memory nodes and NIC locality reported through sysfs.
 
-## Timing boundaries
+NUMA test pods add SYS_NICE for memory-policy operations. Both local and remote placements must be available, and `numactl` must successfully apply the requested bindings. Unknown topology, restricted CPU sets, missing packages or denied memory policy cause the test to fail. Review the reported reason before changing worker configuration.
 
-ResourceClaim allocation is first observed by polling: it is an upper bound, not an exact
-allocation-transition timestamp. PodReadyToStartContainers includes sandbox/network and other
-preparation; an independent DRA NodePrepareResources duration is not exposed by this implementation.
-Missing or inconsistent timestamps remain Unknown. Application-level readiness is not inferred
-from a sleeping validation container. Failure results retain the latest startup observation and
-pod status, so allocation/startup blockers can be distinguished from benchmark failures.
+Repeat comparisons under similar CPU load. The test records the combined effect of placement at both endpoints.
 
-Capacity timing is based on operation milestones and retained validation jobs. Apply completion
-includes ORM orchestration, provisioning and bootstrap; these are not separated into invented
-service durations. New-node registration and Ready API timestamps are retained as operation
-node_stage_evidence. RDMA authentication start/end is not independently timed. After scaling,
-run a matrix or enough pair tests to cover all new workers; until then time-to-verified remains
-unmeasured. A single-worker pool cannot establish cross-node RDMA performance.
+## Timing details
 
-## Validation status
+Claim allocation is recorded when the poller first sees it, so the measured delay includes polling overhead. `PodReadyToStartContainers` covers sandbox and network preparation. Startup results describe the validation container; measure application startup separately if your application needs additional initialization.
 
-Validate each enabled profile in your own cluster. Results depend on the image, shape, placement, runtime policy and current load.
+The implementation does not separately time DRA `NodePrepareResources` or RDMA authentication. Missing or inconsistent timestamps appear as Unknown. Failed runs retain the latest startup observations and pod status to help distinguish scheduling and image issues from benchmark failures.
+
+Capacity timings use operation milestones and retained validation jobs. Apply duration includes Resource Manager orchestration, provisioning and bootstrap. Registration and Ready timestamps are stored in `node_stage_evidence`. After scaling, run enough pair tests or a matrix to cover all new workers. Verified-capacity timing remains unmeasured until those checks pass; a one-worker pool needs a second worker for cross-node testing.
+
+## Scheduled tests
+
+[Monitoring](MONITORING.md) can run one quick pair test per UTC day when enabled. It rotates eligible pairs and skips a day if fewer than two workers are available when the job runs. Results appear with manual measurements. Use a manual matrix when you need coverage of every eligible pair.
 
 References:
-- https://docs.open-mpi.org/en/v5.0.5/launching-apps/ssh.html
-- https://docs.open-mpi.org/en/v5.0.7/tuning-apps/networking/ib-and-roce.html
-- https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/
+
+- [Open MPI SSH launch](https://docs.open-mpi.org/en/v5.0.5/launching-apps/ssh.html)
+- [Open MPI InfiniBand and RoCE transport](https://docs.open-mpi.org/en/v5.0.7/tuning-apps/networking/ib-and-roce.html)
+- [Kubernetes pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)

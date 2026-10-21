@@ -1,15 +1,15 @@
 # Operator VM guide
 
-Use this route to operate from SSH without the browser. Start with [deployment and private access](../README.md). All commands on this page run on the **operator VM**, not a worker or Cloud Shell, unless a section explicitly says otherwise.
+Use this route to operate from SSH without the browser. Start with [deployment and private access](../README.md). All commands on this page run on the **operator VM**, not a worker or Cloud Shell, unless a section says otherwise.
 
 ## 1. Check the operator
 
 ```bash
 kubectl get nodes -o wide
-sudo systemctl status oke-rdma-control --no-pager
+sudo systemctl status oke-rdma-control-api.service oke-rdma-control-worker.service --no-pager
 ```
 
-Expected: the control service is active; provisioned workers appear in Kubernetes. A zero-worker deployment has no workers yet. If the service is unavailable, run `oke-rdma-doctor` and follow [troubleshooting](TROUBLESHOOTING.md).
+Expected: both services are active; provisioned workers appear in Kubernetes. A zero-worker deployment has no workers yet. If the service is unavailable, run `oke-rdma-doctor` and follow [troubleshooting](TROUBLESHOOTING.md).
 
 ## 2. Build the image and create the pull secret
 
@@ -17,7 +17,7 @@ Complete [image build → package verification → registry push → digest → 
 
 ## 3. Define a terminal API helper
 
-Paste this Bash function into the operator shell. It reads the token internally using sudo, sends it only to localhost, and prints JSON responses. It does not print the token or put it in command-line arguments. It is a shell-session helper, not a new installed product CLI.
+Paste this Bash function into the operator shell. It reads the token internally using sudo, sends it only to localhost, and prints JSON responses. It does not print the token or put it in command-line arguments. Define it again when you open a new shell session.
 
 ```bash
 api() {
@@ -56,18 +56,18 @@ with open('/etc/oke-rdma-control/config.json') as f:
 PY
 ```
 
-Examples below use `hpc-oke-rdma`. Replace it if your environment differs. An accepted job response means **queued**, not completed. Record its returned job ID; poll the exact job before proceeding:
+Examples below use `hpc-oke-rdma`. Replace it if your environment differs. An accepted job enters the **queued** state. Record its returned job ID; poll the exact job before proceeding:
 
 ```bash
 api GET /api/v1/jobs
 api GET /api/v1/jobs/REPLACE_WITH_RETURNED_JOB_ID
 ```
 
-Inspect status, result and error. After a request timeout, check job history before resubmitting. A successful HTTP response is not by itself evidence that the queued operation passed.
+Inspect status, result and error. After a request timeout, check job history before resubmitting. Continue when the job reports success.
 
 ## 4. Save configuration and check hosts
 
-Replace the image placeholder with your real immutable digest; the example is deliberately not a valid runnable image:
+Replace the image placeholder with the immutable digest recorded during image setup:
 
 ```bash
 api PUT /api/v1/rdma/config '{
@@ -82,9 +82,9 @@ api GET /api/v1/preflight
 api POST /api/v1/jobs '{"action":"check_hosts","confirmation":"hpc-oke-rdma"}'
 ```
 
-For a public image set the secret name to an empty string. Ensure the child CIDR does not overlap your VCN/pod/service/fabric ranges. Poll the host-check job until complete. Require successfully collected host facts and resolved findings before installation. Two Kubernetes Ready nodes alone do not establish RDMA readiness.
+For a public image set the secret name to an empty string. Ensure the child CIDR does not overlap your VCN/pod/service/fabric ranges. Poll the host-check job until complete. Require successfully collected host facts and resolved findings before installation. Check both Kubernetes and RDMA readiness.
 
-The checks target `oci-rdma=true,oke-rdma-mode=dranet`. Evidence may be reused for 24 hours and is invalidated after reboot. An empty facts object is a collection failure; investigate execution before changing every host setting.
+The checks target `oci-rdma=true,oke-rdma-mode=dranet`. Host-check results may be reused for 24 hours and is invalidated after reboot. An empty facts object is a collection failure; investigate execution before changing every host setting.
 
 ## 5. Install Dranet and validate RDMA
 
@@ -113,7 +113,7 @@ api POST /api/v1/jobs '{"action":"rdma_validation","confirmation":"hpc-oke-rdma"
 
 Empty node values select automatically. To pin endpoints, replace them with two distinct Kubernetes node names observed in your pool. Poll the job. Expected: measured bandwidth and latency and successful cleanup. The test uses 64 KiB bandwidth and 8-byte latency writes, 5,000 iterations each. Latency is perftest's half-round-trip estimate in microseconds. No fixed throughput is assumed.
 
-Do not count historical bandwidth-only evidence as a combined pass. Host readiness and scale-out do not automatically benchmark the network. After fleet/configuration changes, run a new test; one passing pair does not validate every pair.
+Require both bandwidth and latency to pass. After fleet or configuration changes, run enough pair tests to cover the affected workers. Host checks and scaling do not run performance tests; scheduled pair testing is a separate opt-in.
 
 ## 6. Export and run a workload
 
@@ -133,9 +133,9 @@ kubectl apply -f rdma-workload.yaml
 kubectl -n rdma-workloads get pods,resourceclaims
 ```
 
-Use actual names from the exported YAML for `kubectl describe pod`, `kubectl logs` and claim inspection. A Pending pod can mean no free RDMA NIC, an unresolved claim, an image issue or scheduling constraints; inspect events before guessing.
+Use names from the exported YAML for `kubectl describe pod`, `kubectl logs` and claim inspection. A Pending pod can mean no free RDMA NIC, an unresolved claim, an image issue or scheduling constraints; inspect events before guessing.
 
-Each independently scheduled RDMA pod needs a claim. Do not launch extra replicas all referencing a single claim unless your application design explicitly supports that consumption model. Stop application controllers before deleting their pods. Release completed claims only after the consumers have stopped.
+Each independently scheduled RDMA pod needs a claim. Do not launch extra replicas all referencing a single claim unless your application design supports that consumption model. Stop application controllers before deleting their pods. Release completed claims only after the consumers have stopped.
 
 ## 7. Inspect failed diagnostics and reservations
 
@@ -153,7 +153,7 @@ api GET /api/v1/diagnostics/reports/REPLACE_WITH_REPORT_ID/text
 api GET /api/v1/diagnostics/reports/REPLACE_WITH_REPORT_ID/json
 ```
 
-### Capture evidence while a diagnostic is still present
+### Inspect a running diagnostic
 
 Use a second SSH session while the check runs:
 
@@ -170,15 +170,15 @@ kubectl -n oke-rdma-diagnostics logs REPLACE_WITH_POD_NAME -c diagnostic
 kubectl -n oke-rdma-diagnostics get events --field-selector involvedObject.name=REPLACE_WITH_POD_NAME --sort-by=.metadata.creationTimestamp
 ```
 
-Inspect `status.containerStatuses[].state.terminated` for reason, exit code and message, plus pod reason/message and image events. A terminated-container error from log retrieval does not explain why the container stopped. The report preserves status and bounded events before deleting the pod. If evidence collection itself fails, the report identifies that limitation. Namespace events eventually expire.
+Inspect `status.containerStatuses[].state.terminated` for reason, exit code and message, plus pod reason/message and image events. A terminated-container error from log retrieval does not explain why the container stopped. The report saves pod status and recent events before deleting the pod. The report identifies any errors while collecting output. Namespace events eventually expire.
 
-| Evidence | What to investigate next |
+| Result | What to investigate next |
 |---|---|
 | FailedToRetrieveImagePullSecret | Secret name, existence and namespace; [image and registry setup](IMAGE-PULL-SECRET.md). |
 | Unauthorized image pull | Registry hostname, token validity and repository permissions. |
 | Image not found | Repository and exact pushed digest. |
 | Registry connection timeout | Egress, DNS, routing and registry reachability. |
-| Nonzero exit / shell or command error | Tools-image contents and the diagnostic's actual output. |
+| Nonzero exit / shell or command error | Tools-image contents and the diagnostic's output. |
 | OOMKilled / deadline exceeded | Termination state, resource use and timing; do not infer solely from elapsed duration. |
 | Facts collected with missing PF/address/NRI | Specific image/bootstrap/OCA/runtime prerequisite. |
 
@@ -218,7 +218,7 @@ kubectl get deviceclass dra.net
 kubectl get resourceslices
 ```
 
-6. Inspect the installed DaemonSet and pod readiness; identify its actual name with `kubectl -n kube-system get daemonsets`. Use `kubectl -n kube-system rollout status daemonset/ACTUAL_NAME --timeout=180s`.
+6. Inspect the installed DaemonSet and pod readiness; identify its name with `kubectl -n kube-system get daemonsets`. Use `kubectl -n kube-system rollout status daemonset/ACTUAL_NAME --timeout=180s`.
 7. Run section 5's combined validation and section 6's application workflow.
 
 Manual installation does not automatically create a successful Control Center installation job. Refresh discovery and verify configuration before declaring setup complete. Do not change PF/child range under allocated claims. Do not run a separate unguarded node-pool resize alongside Resource Manager ownership.
@@ -251,7 +251,7 @@ After reviewing an allowed current plan, submit:
 api POST /api/v1/jobs '{"action":"capacity_apply","capacity_operation_id":"REPLACE_WITH_REVIEWED_OPERATION_ID","confirmation":"SCALE hpc-oke-rdma"}'
 ```
 
-Poll its job and capacity state. An accepted apply is not completion. Wait for infrastructure convergence and host/device readiness. No automatic performance benchmark is performed.
+Poll its job and capacity state. Wait for the Apply to finish and for host/device readiness to pass. No automatic performance benchmark is performed.
 
 ### Discard or recover
 
@@ -305,7 +305,7 @@ kubectl -n rdma-workloads delete pod rdma-example --wait=true
 kubectl -n rdma-workloads delete resourceclaim rdma-example --wait=true
 ```
 
-### Deliberate RDMA reset
+### Reset RDMA setup
 
 Stop application workloads and release their claims/templates. Retrieve the preview:
 
@@ -319,7 +319,7 @@ Review every removal and blocker, require `can_reset`, and copy the returned cur
 api POST /api/v1/jobs '{"action":"reset_rdma","reset_plan_id":"REPLACE_WITH_REVIEWED_PLAN_ID","confirmation":"RESET hpc-oke-rdma"}'
 ```
 
-Poll the job. A changed inventory requires a fresh preview. Reset retains infrastructure, workers, host drivers, namespaces, pull secrets and history; it removes supported RDMA setup and owned test resources and clears relevant overrides/evidence. Repeat setup afterward. It does not repair a missing registry secret, reboot workers or destroy the cluster.
+Poll the job. A changed inventory requires a fresh preview. Reset retains infrastructure, workers, host drivers, namespaces, pull secrets and history; it removes supported RDMA setup and owned test resources and clears runtime overrides and cached host checks. Repeat setup afterward. It does not repair a missing registry secret, reboot workers or destroy the cluster.
 
 
 ## 11. Run additional performance tests
@@ -341,3 +341,42 @@ List node names with `kubectl get nodes`. Use the fixed diagnostic profiles in s
 Closing SSH or the browser tunnel does not stop OCI resources or cancel a queued job. For a temporary pause, stop workloads and use the reviewed scale-to-zero workflow; the operator, cluster and other resources remain. For permanent removal, follow [shutdown and cleanup](OPERATIONS.md).
 
 Use [troubleshooting](TROUBLESHOOTING.md) when a command fails. `api: command not found` means the helper in section 3 has not been defined in this shell; paste its complete definition again.
+
+## 14. Monitor from the terminal
+
+Read the saved settings and latest snapshot:
+
+```bash
+api GET /api/v1/monitoring
+```
+
+Run an on-demand sweep using the saved settings:
+
+```bash
+api POST /api/v1/jobs '{"action":"monitoring_sweep","confirmation":"hpc-oke-rdma"}'
+```
+
+Poll the returned job. If idle-host refresh is enabled, this can run one privileged host diagnostic. To enable a passive 15-minute schedule, replace the confirmation name and submit the complete settings below. This request replaces the saved monitoring configuration, so retain any topic or maintenance pause you want to keep:
+
+```bash
+api PUT /api/v1/monitoring '{
+  "enabled": true,
+  "interval_seconds": 900,
+  "stale_seconds": 7200,
+  "refresh_idle_hosts": false,
+  "nightly_pair": false,
+  "nightly_hour_utc": 1,
+  "maintenance_until": 0,
+  "claim_age_seconds": 86400,
+  "notification_topic": "",
+  "confirmation": "hpc-oke-rdma"
+}'
+```
+
+Approve a reference only after reviewing a worker’s fresh healthy profile in the snapshot. Replace the node name:
+
+```bash
+api POST /api/v1/jobs '{"action":"monitoring_baseline","node_name":"REPLACE_WITH_NODE_NAME","confirmation":"hpc-oke-rdma"}'
+```
+
+See [monitoring](MONITORING.md) for each field, alert delivery, metrics authentication and application updates.

@@ -13,7 +13,7 @@ Resource Manager provisions a private enhanced OKE cluster, VCN-native pod netwo
 | Control Center API and worker | Configuration, fixed operations, readiness checks, job state, results and exports |
 | Workload owner | Container image, application resources, workload lifecycle and claim cleanup |
 
-The operator API and durable worker run as separate services. The worker serializes operations and records settings with each job. Diagnostic and validation output remains attached to the operation that produced it.
+The operator API and durable worker run as separate services. Optional scheduled monitoring uses the same queue, stores health snapshots and profile comparisons, and publishes alerts to an existing OCI Notifications topic. The authenticated metrics endpoint reads stored results without running diagnostics. The worker serializes operations and records settings with each job. Diagnostic and validation output remains attached to the operation that produced it.
 
 ## Workload networking
 
@@ -34,3 +34,17 @@ ResourceClaims and scheduler affinity select devices and nodes together. Workloa
 Bastion provides managed SSH and port forwarding to the private operator. The browser authenticates with an operator token held only in memory. The infrastructure Dranet daemon and fixed host-diagnostic pods are privileged. Application pods are unprivileged, have no host PID/IPC namespace or service-account token, and retain only the IPC_LOCK capability required by the profile.
 
 Shared PF access is suitable for trusted HPC workloads. It does not provide dedicated VF isolation or an authorization boundary between untrusted tenants. Review [Security](../SECURITY.md) before broadening access.
+
+## Reading the diagram
+
+The README diagram is a conceptual view. The Terraform configuration defines these deployment details:
+
+| Diagram element | Deployment behavior |
+| --- | --- |
+| Addresses beginning with 10.0 | Examples. Defaults use VCN `10.70.0.0/16`, API `10.70.0.0/28`, workers `10.70.1.0/24`, pods `10.70.16.0/20`, service load balancers `10.70.32.0/24`, operator `10.70.48.0/28` and Bastion endpoint `10.70.49.0/28`. |
+| Bastion VM / public subnet | Terraform creates the managed OCI Bastion service, targeting a private subnet. It creates no Bastion VM. All project subnets prohibit public IPs. |
+| Object Storage / tools image | Object Storage holds the operator bootstrap payload. Build and push the container tools image to OCIR using the registry guide. |
+| Monitoring and auditing | OCI services are shown for context. The project stores operation history on the operator; its optional monitoring uses local snapshots, an authenticated metrics endpoint and an existing Notifications topic. Terraform does not create a monitoring dashboard, log group or notification topic. |
+| Two RDMA PFs per worker | The reference profile selects `ens800f0np0` and publishes one eligible NIC per worker. Other ports may remain unused. |
+
+Use the stack variables and outputs when checking addresses and resources in your deployment.

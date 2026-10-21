@@ -4,7 +4,7 @@ import re
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-Action = Literal['replacement_preview', 'replacement_run', 'replacement_resume', 'replacement_close', 'recovery_restart_assess', 'recovery_assess', 'recovery_run', 'recovery_finish', 'preflight', 'check_hosts', 'install_dranet', 'rdma_validation', 'cleanup_validation', 'reset_rdma', 'capacity_plan', 'capacity_apply', 'capacity_discard', 'capacity_resume', 'capacity_close']
+Action = Literal['monitoring_sweep', 'monitoring_baseline', 'replacement_preview', 'replacement_run', 'replacement_resume', 'replacement_close', 'recovery_restart_assess', 'recovery_assess', 'recovery_run', 'recovery_finish', 'preflight', 'check_hosts', 'install_dranet', 'rdma_validation', 'cleanup_validation', 'reset_rdma', 'capacity_plan', 'capacity_apply', 'capacity_discard', 'capacity_resume', 'capacity_close']
 
 class JobCreate(BaseModel):
     model_config = ConfigDict(extra='forbid')

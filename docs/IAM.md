@@ -30,3 +30,7 @@ The identity running the Resource Manager job also needs permission to provision
 Disabling creation of a policy already managed by Terraform can plan its deletion. Establish replacement access before making that change, and review the plan. A supplied existing group OCID does not change membership. After operator replacement, verify that an instance-specific rule matches the new VM.
 
 Capacity-report permission belongs in the node-pool compartment. See [capacity](CAPACITY.md) for the statement and the separate Terraform discovery permissions. Worker replacement additionally needs pool-scoped DeleteNode and work-request access; review the generated policy before using [replacement](REPLACEMENT.md).
+
+## Optional monitoring alerts
+
+OCI Notifications alerts need compartment-scoped topic read and publish permissions for the operator dynamic group. These optional grants are configured separately from scaling. Follow [monitoring setup](MONITORING.md#send-alerts-through-oci-notifications) to use an existing topic and confirmed subscription.

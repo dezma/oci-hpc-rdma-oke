@@ -35,7 +35,7 @@ Resource Manager jobs need permissions for the resources Terraform refreshes as 
 - Compute instance-family management and the required subnet, VNIC, private-IP, and network-security-group use permissions in the deployment compartment.
 - Read access for stack resources, including networking, compute clusters, buckets, Bastion, policies, and tenancy-level discovery.
 
-These are infrastructure administration permissions, including instance management in the deployment compartment. Enable them deliberately in an appropriately scoped deployment compartment. The policy does not grant IAM write permissions. Review the `capacity_management_policy` Terraform output or [iam.tf](../terraform/iam.tf) before activation.
+These are infrastructure administration permissions, including instance management in the deployment compartment. Grant them in the project compartment after administrator review. The policy does not grant IAM write permissions. Review the `capacity_management_policy` Terraform output or [iam.tf](../terraform/iam.tf) before activation.
 
 An administrator can render separate policy requests for a provisioned operator using [capacity-policy.py](../provisioning/capacity-policy.py). Obtain the IDs from the existing stack and its outputs, replace every placeholder, and run this from the source checkout in Cloud Shell:
 
@@ -84,7 +84,7 @@ Confirm these settings in the current stack's Terraform configuration before usi
 2. Select **Check capacity and scaling prerequisites** first. Require a passing report, then select **Generate scale plan** and confirm the environment name. This updates only the stack's `node_count` variable and creates a PLAN job. Existing stack variables are preserved using an ETag-protected update. Infrastructure has not been resized at this stage.
 3. Review the before/after worker count and the sanitized Terraform change summary. The guard permits exactly one in-place node-pool size update. It rejects replacements, unknown configuration changes, node cycling, and changes to any other managed resource. Raw plans and Terraform state are never sent to the browser or retained as application reports.
 4. Select **Review and apply plan** and type `SCALE <environment name>`. The application rechecks the stack inputs, ETag, latest OCI job, plan artifact, pool state, and workloads, then applies the exact reviewed PLAN job. It never uses an automatically approved apply.
-5. Track the OCI apply, worker readiness, Dranet device publication, and new-worker host evidence beside the action. New workers inherit the node-pool image, bootstrap, labels, and Dranet DaemonSet configuration.
+5. Track the OCI apply, worker readiness, Dranet device publication, and new-worker host-check results beside the action. New workers inherit the node-pool image, bootstrap, labels, and Dranet DaemonSet configuration.
 
 Approval expires after 30 minutes. An expired or changed plan must be discarded and regenerated. **Discard target** restores the previous `node_count` value, including removing the override if the original stack used its Terraform default. Discard does not apply infrastructure changes. If stack inputs changed externally, discard refuses to overwrite them; reconcile the pending target with the stack administrator first.
 
@@ -94,23 +94,23 @@ A pending operation prevents another scale plan, RDMA reset, validation, or driv
 
 Stop application workloads and keep their controllers paused until scale-in finishes. Scale-in is blocked while the RDMA pool has application pods, RDMA ResourceClaims, or RDMA claim templates, including pending reservations. A retained claim must be released by its owner. Kubernetes infrastructure pods may drain under their existing disruption budgets.
 
-Every current worker must be Ready and schedulable before the operation begins. Force termination must be explicitly disabled and eviction grace must be nonzero. These checks run again immediately before apply. OKE determines which workers a node-count reduction removes, so the tool requires the application pool to be idle rather than promising a particular node will be removed. It does not override disruption budgets, strip finalizers, or force-delete application pods. There is no global lock against changes made by external Kubernetes administrators; keep application controllers paused as instructed.
+Every current worker must be Ready and schedulable before the operation begins. Force termination must be disabled and eviction grace must be nonzero. These checks run again immediately before apply. OKE determines which workers a node-count reduction removes, so the tool requires the application pool to be idle rather than promising a particular node will be removed. It does not override disruption budgets, strip finalizers, or force-delete application pods. There is no global lock against changes made by external Kubernetes administrators; keep application controllers paused as instructed.
 
 Scaling in terminates workers and can discard their node-local data. Keep durable application data on appropriate persistent storage. Increasing worker count adds capacity; it does not change the rank count of an already-running MPI job.
 
 ## Readiness and recovery
 
-The tool waits for the requested pool size and Kubernetes readiness, then checks host evidence for new workers or workers whose boot identity changed before waiting for Dranet/device publication. Current evidence for other workers is reused. No automatic bandwidth or latency benchmark is run: a capacity/readiness operation is distinct from a measured cross-node workload validation.
+The tool waits for the requested pool size and Kubernetes readiness, then runs host checks for new workers or workers whose boot identity changed before waiting for Dranet/device publication. Recent checks for other workers are reused. Run a pair test or matrix after readiness passes. Scheduled monitoring can also run an optional nightly pair test.
 
-If Terraform applies successfully but workers or RDMA devices are still initializing, **Resume recorded operation** continues monitoring and verification. OCI job IDs and submission phases are persisted before and after remote calls. A worker interruption or lost API response never causes an apply to be silently resubmitted. When submission outcome is uncertain, resume searches for the unique recorded operation; if it cannot identify a single job, inspect Resource Manager before taking further action.
+If Terraform applies successfully but workers or RDMA devices are still initializing, **Resume recorded operation** continues monitoring and verification. OCI job IDs and submission phases are persisted before and after remote calls. A worker interruption or lost API response never causes an apply to be resubmitted. When submission outcome is uncertain, resume searches for the unique recorded operation; if it cannot identify a single job, inspect Resource Manager before taking further action.
 
-An apply that has been submitted cannot be discarded. A terminal failed/canceled apply can be explicitly acknowledged using **Acknowledge failed apply** after inspecting its OCI job. This releases the local operation lock without changing infrastructure or stack variables. Review actual capacity and the stack target before generating a new reconciliation plan. A successful infrastructure apply with failed host readiness is reported as needing attention; the tool does not automatically roll infrastructure back.
+An apply that has been submitted cannot be discarded. A terminal failed/canceled apply can be acknowledged using **Acknowledge failed apply** after inspecting its OCI job. This releases the local operation lock without changing infrastructure or stack variables. Review capacity and the stack target before generating a new reconciliation plan. A successful infrastructure apply with failed host readiness is reported as needing attention; the tool does not automatically roll infrastructure back.
 
 The UI refreshes observed capacity on request and during operations. Operation history retains the reviewed counts, plan hash, OCI job IDs, progress, and host reports. Source-controlled variable files should reflect the intended node count when moving the same deployment to a different Terraform execution workflow.
 
 ## Readiness before planning
 
-Open **Workers & scaling → Scale workers**, choose the target, then select **Check capacity and scaling prerequisites**. This read-only review checks stack ownership, read access, active ORM jobs, cycling configuration, worker readiness and direction-specific restrictions. It makes no stack or infrastructure changes. Write permissions and the contents of a future Terraform plan remain explicitly unverified. Generate-plan becomes available after a passing review; the review expires after five minutes or a changed target. The backend repeats its safety checks for each operation. Stack connection errors identify the OCID, ownership or access issue separately from the environment confirmation field.
+Open **Workers & scaling → Scale workers**, choose the target, then select **Check capacity and scaling prerequisites**. This read-only review checks stack ownership, read access, active ORM jobs, cycling configuration, worker readiness and direction-specific restrictions. It makes no stack or infrastructure changes. Write permissions and the contents of a future Terraform plan remain unverified. Generate-plan becomes available after a passing review; the review expires after five minutes or a changed target. The backend repeats its safety checks for each operation. Stack connection errors identify the OCID, ownership or access issue separately from the environment confirmation field.
 
 ## Explain a blocked scale plan
 
@@ -124,10 +124,9 @@ sudo /opt/oke-rdma-control/venv/bin/python provisioning/explain-capacity-plan.py
 
 It reads the recorded OCI plan, verifies its job/stack identity and prints the gate result. It does not update the stack, submit jobs, or alter the pending operation. Share the field-path output when diagnosing a rejection; the complete Terraform plan can contain sensitive values.
 
-After review, discard a blocked scaling target to restore the previous desired count. Apply any intended non-scaling configuration changes through a separately reviewed Resource Manager plan at the current worker count. Generate a fresh scale plan only once the baseline is aligned. A gate rejection alone does not prove which proposed change is desirable.
+After review, discard a blocked scaling target to restore the previous desired count. Apply any intended non-scaling configuration changes through a separately reviewed Resource Manager plan at the current worker count. Generate a fresh scale plan only once the baseline is aligned. Review each rejected change with the stack administrator.
 
-Equivalent known eviction durations (for example, `PT1H` and `PT60M`) are treated as the same setting by the size-only plan check. Actual grace-period changes, force-deletion changes, unknown values and unrelated edits remain blocked. The error reports safe before/after grace values; apply intended maintenance separately at the current worker count.
-
+Equivalent known eviction durations (for example, `PT1H` and `PT60M`) are treated as the same setting by the size-only plan check. grace-period changes, force-deletion changes, unknown values and unrelated edits remain blocked. The error reports safe before/after grace values; apply intended maintenance separately at the current worker count.
 
 
 ## Capacity report permissions and interpretation
@@ -140,11 +139,11 @@ Allow dynamic-group id <operator-dynamic-group-ocid> to manage compute-capacity-
 
 This permission is included in the generated compartment policy. It creates reports, not instances or reservations. If an instance-principal CLI report already succeeds for this compartment, additional report permission is not required. Other Terraform refresh/discovery permissions remain separate.
 
-The check runs before planning and again before apply. AVAILABLE is a snapshot; the count is displayed only when returned. Not disclosed does not mean zero. REPORT_UNAVAILABLE means the request/response could not establish availability; inspect its sanitized error. OUT_OF_HOST_CAPACITY and HARDWARE_NOT_SUPPORTED are actual returned capacity statuses. Counts do not guarantee placement in the specific Compute Cluster, quota or RDMA readiness.
+The check runs before planning and again before apply. AVAILABLE is a snapshot; the count is displayed only when returned. “Not disclosed” means OCI omitted the count. REPORT_UNAVAILABLE means the request/response could not establish availability; inspect its sanitized error. OUT_OF_HOST_CAPACITY and HARDWARE_NOT_SUPPORTED are returned capacity statuses. Counts do not guarantee placement in the specific Compute Cluster, quota or RDMA readiness.
 
 ## Images and worker changes
 
-Select an approved operator image name under Advanced operator VM → Approved operator image override. It must remain pinned during worker scaling, as must the worker image. Review image maintenance separately from node count. A blocked size-only plan is not permission to ignore other Terraform changes.
+Select an approved operator image name under Advanced operator VM → Approved operator image override. It must remain pinned during worker scaling, as must the worker image. Review image maintenance separately from node count. Handle unrelated Terraform changes in a separate reviewed maintenance plan.
 
 After scale-out, run pair tests or a matrix covering the new workers. The timing panel shows observed provisioning/readiness stages and time until successful validation covers the new identities. Missing timings remain unknown. See [performance](PERFORMANCE.md).
 
@@ -163,7 +162,7 @@ A failed Apply can leave real infrastructure changes. For example, a request fro
 6. Review the fresh size-only plan. The Terraform change is requested size 6 → 5 (or 3), not a guarantee about which individual workers OKE retains. Reject unrelated image, network or replacement changes.
 7. Apply the reviewed plan and wait for current capacity/readiness checks. Revalidate RDMA on the surviving workers.
 
-Reconciliation permits a requested/observed mismatch only for a terminal failed/canceled Apply on the owning stack, no active OKE work, matching surviving ACTIVE OCI and Ready/schedulable Kubernetes workers, and an ACTIVE or NEEDS_ATTENTION pool. Unknown lifecycle states, unmatched or unready workers, workload/claim blockers, unsafe eviction settings and inventory changes after planning still block it. A target above the surviving count is not this recovery path. Capacity reports are not required for a reduction, but they remain required for ordinary scale-up.
+Reconciliation permits a requested/observed mismatch only for a terminal failed/canceled Apply on the owning stack, no active OKE work, matching surviving ACTIVE OCI and Ready/schedulable Kubernetes workers, and an ACTIVE or NEEDS_ATTENTION pool. Unknown lifecycle states, unmatched or unready workers, workload/claim blockers, unsafe eviction settings and inventory changes after planning still block it. To add workers beyond the surviving count, complete reconciliation first and then use ordinary scale-up. Capacity reports are not required for a reduction, but they remain required for ordinary scale-up.
 
 No rollback, automatic retry or direct node deletion is performed. An unavailable work-request read blocks safely; the operator requires `read cluster-work-requests` in the pool compartment. Older acknowledged-failure records are displayed as failed acknowledgements without rewriting their stored history.
 

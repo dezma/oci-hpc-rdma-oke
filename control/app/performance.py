@@ -29,7 +29,7 @@ def dashboard(jobs, environment, settings, now=None):
     now=time.time() if now is None else now
     names=sorted(n['name'] for n in environment['nodes'] if n.get('mode')=='dranet')
     current={n['name']:n for n in environment['nodes']}
-    runs=sorted([j for j in jobs if j.get('action')=='rdma_validation' and j.get('requested_at',0)>environment.get('reset_at',0)],key=lambda j:j.get('requested_at',0),reverse=True)
+    runs=sorted([j for j in jobs if j.get('action') in {'rdma_validation','monitoring_benchmark'} and j.get('requested_at',0)>environment.get('reset_at',0)],key=lambda j:j.get('requested_at',0),reverse=True)
     expanded=[]
     for job in runs:
         samples=(job.get('result') or {}).get('pair_results')
@@ -81,7 +81,7 @@ def capacity_timing(operation, jobs):
     for job in jobs:
         result=job.get('result') or {}
         for sample in result.get('pair_results',[result]):
-            if job.get('action')!='rdma_validation' or sample.get('status')!='passed' or not start or sample.get('measured_at',0)<start:continue
+            if job.get('action') not in {'rdma_validation','monitoring_benchmark'} or sample.get('status')!='passed' or not start or sample.get('measured_at',0)<start:continue
             if not positive(sample.get('average_gbps')) or not positive(sample.get('latency',{}).get('average_us')):continue
             for node in sample.get('provenance',{}).get('workers',[]):
                 if any(all(node.get(k)==t.get(k) and node.get(k) for k in ['name','uid','boot_id']) for t in targets):
