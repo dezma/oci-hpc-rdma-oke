@@ -373,7 +373,7 @@ api PUT /api/v1/monitoring '{
 }'
 ```
 
-Approve a reference only after reviewing a worker’s fresh healthy profile in the snapshot. Replace the node name:
+Approve a reference only after reviewing a worker's fresh healthy profile in the snapshot. Replace the node name:
 
 ```bash
 api POST /api/v1/jobs '{"action":"monitoring_baseline","node_name":"REPLACE_WITH_NODE_NAME","confirmation":"hpc-oke-rdma"}'

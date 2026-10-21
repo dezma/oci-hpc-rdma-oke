@@ -72,7 +72,7 @@ In step 4, leave both endpoint selectors on Automatic for a quick check, or sele
 
 Automatic MPI uses up to eight free workers; choosing both endpoints limits MPI to the selected pair. Matrix ignores endpoint selectors and measures all ordered pairs of free workers, up to eight. Extended tests require idle endpoints and generate deliberate traffic. Review the confirmation scope before starting.
 
-The matrix and detailed baseline table have separate panels. Blank cells mean the pair wasn’t tested. A comparable baseline requires matching test conditions; a changed-condition reference is informational. Host or configuration changes can make historical results stale.
+The matrix and detailed baseline table have separate panels. Blank cells mean the pair wasn't tested. A comparable baseline requires matching test conditions; a changed-condition reference is informational. Host or configuration changes can make historical results stale.
 
 Bandwidth is in Gbit/s. Latency is in microseconds and follows perftest's half-round-trip method. p99 is the latency at or below which 99% of the samples fall. Higher bandwidth and lower latency are generally preferable under comparable conditions. Validate your application under its expected load.
 
@@ -121,4 +121,4 @@ Use Maintenance reset when you intend to remove the RDMA setup and configure it 
 
 ## 11. Monitor health and drift
 
-Open **Maintenance → Monitoring & drift**. Run a health sweep, review a healthy worker’s profile and approve it as the comparison reference. Then enable scheduled checks and any optional host refresh or nightly pair test. The same page contains maintenance pauses and OCI Notifications settings. Follow [monitoring setup](MONITORING.md) for field explanations, alerts and metrics.
+Open **Maintenance → Monitoring & drift**. Run a health sweep, review a healthy worker's profile and approve it as the comparison reference. Then enable scheduled checks and any optional host refresh or nightly pair test. The same page contains maintenance pauses and OCI Notifications settings. Follow [monitoring setup](MONITORING.md) for field explanations, alerts and metrics.

@@ -20,9 +20,9 @@ The schedule runs on the operator VM even when your browser is closed. A stopped
 | Check interval | Time between scheduled sweeps; default 900 seconds, minimum 300. |
 | Evidence expires after | Host checks older than this become stale; default 7,200 seconds. A reboot also invalidates old evidence. |
 | Refresh idle host-check results | Run one short-lived privileged, fixed host diagnostic per sweep, choosing the least recently checked idle worker. Disabled initially. |
-| Nightly quick pair test | Test one eligible free pair per UTC day, rotating through pairs. Disabled initially. This creates temporary validation pods/claims and deliberate bandwidth/latency traffic. Use the matrix profile for all-pair coverage. |
+| Nightly quick pair test | Test one eligible free pair per UTC day, rotating through pairs. Disabled initially. This creates temporary validation pods/claims and test traffic. Use the matrix profile for all-pair coverage. |
 | Nightly hour | Earliest UTC hour for that day's test. If busy then, it can run later that day. No backlog of missed days is replayed. |
-| Claim review age | Alert when a retained claim exceeds this age; default 24 hours. This asks for review and does not establish that the claim is orphaned or safe to delete. |
+| Claim review age | Alert when a retained claim exceeds this age; default 24 hours. Review it before deleting. |
 | OCI Notifications topic | Optional existing topic OCID in the operator's region; blank retains alerts locally without sending. |
 | Pause until | UTC time, at most seven days ahead. Pauses sweeps and nightly tests without changing workers. Clear it to resume. |
 
@@ -36,7 +36,7 @@ All monitoring jobs share the existing serial operation queue. Pending scaling, 
 - **Unhealthy:** observed readiness failure. Expand the results and use the worker diagnosis flow.
 - **Unknown:** host collection is absent or failed. Check image access, pod events and diagnostic reports before concluding the hardware failed.
 - **Stale:** observations expired or belong to an earlier boot. Run a fresh host check when the worker is available.
-- **Maintenance:** worker cordoned or monitoring paused; this does not establish health.
+- **Maintenance:** worker cordoned or monitoring paused. Health isn't checked in this state.
 
 Profile comparison flags changes in known fields. It excludes IP addresses and worker identity, and includes a hash of the configured RDMA settings. A field missing from the approved reference is not compared. Missing current values for known reference fields appear as incomplete. Review and approve a new reference after an intentional fleet change; one reference suits a homogeneous fleet.
 
@@ -46,7 +46,7 @@ Two consecutive sweeps must observe a changed condition before an alert is recor
 
 1. In the same OCI region, open **Developer Services → Application Integration → Notifications**. Create a topic in your project compartment, or ask the compartment administrator for an existing topic.
 2. Create an email or other supported subscription and complete its confirmation. Publishing sends to the topic's subscriptions.
-3. Ask the compartment administrator to grant the operator’s existing dynamic group permission to read topics and publish. The application reads the topic endpoint before sending. Replace both names below:
+3. Ask the compartment administrator to grant the operator's existing dynamic group permission to read topics and publish. The application reads the topic endpoint before sending. Replace both names below:
 
 ```text
 Allow dynamic-group <operator-dynamic-group> to read ons-topics in compartment <project-compartment>
@@ -56,7 +56,15 @@ Allow dynamic-group <operator-dynamic-group> to use ons-topics in compartment <p
 4. Copy the topic OCID into the monitoring form and save. The application does not require tenancy-wide notification permissions or create a topic/subscription for you.
 5. Use the topic's Console **Publish message** action to test subscriber delivery. This tests the subscription path; application delivery additionally requires the operator's publish policy.
 
-The application keeps at most 100 alerts. With no topic configured they remain pending locally. Adding a topic can send retained pending alerts. Each sweep attempts up to three due alerts. Each alert has at most three application attempts. Each attempt looks up the topic endpoint, then publishes, with a 15-second timeout per call and CLI retries disabled. Retries wait at least the configured exponential delay and run on a later sweep. A crash after publish may produce a duplicate: use `event_id` for deduplication. **Sent** means OCI accepted the publish. Check the subscription to confirm receipt. Failed alerts remain visible for review. Pausing/disabling monitoring pauses delivery, too.
+Alert delivery limits and behavior:
+
+- **Retention:** up to 100 alerts. With no topic configured, alerts remain pending locally. Adding a topic can send those retained alerts.
+- **Per sweep:** up to three alerts whose delivery is due.
+- **Retries:** at most three attempts per alert. Retries follow an exponential delay and run on a later sweep. CLI retries are disabled.
+- **Timeouts:** each attempt looks up the topic endpoint, then publishes, with a 15-second timeout per call.
+- **Duplicates:** a crash after publishing may produce a duplicate. Use `event_id` for deduplication.
+- **Delivery status:** **Sent** means OCI accepted the publish. Check the subscription to confirm receipt. Failed alerts remain visible for review.
+- **Pausing:** pausing or disabling monitoring also pauses delivery.
 
 If publication fails, check topic region/OCID, the operator dynamic group's membership, compartment read/publish policies and service reachability. If publication succeeds but no email arrives, check subscription confirmation and spam filtering. Do not paste authentication tokens into the UI.
 

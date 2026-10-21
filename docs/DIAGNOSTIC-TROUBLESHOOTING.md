@@ -35,7 +35,7 @@ kubectl -n rdma-workloads get secret ocir-pull
 
 Expected type: `kubernetes.io/dockerconfigjson`. Verify registry access with a worker image pull. Do not paste secret YAML or decoded credentials into support reports. Re-run the credential script in either guide to refresh both copies, then save the secret name in the UI and rerun diagnosis.
 
-Podman uses the operator’s login; Kubernetes workers use the pull secret in the pod’s namespace. A new cluster needs its own secrets even if the registry repository and operator login still exist. Changing availability domain alone does not require a new regional registry hostname.
+Podman uses the operator's login; Kubernetes workers use the pull secret in the pod's namespace. A new cluster needs its own secrets even if the registry repository and operator login still exist. Changing availability domain alone does not require a new regional registry hostname.
 
 ## Example: authentication failure followed by deadline
 

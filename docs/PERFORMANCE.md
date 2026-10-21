@@ -28,7 +28,7 @@ Latency uses perftest's half-round-trip estimate. p99 is the value at or below w
 
 1. Select **Setup & validation → Measure cross-node RDMA → All free worker pairs**. This profile uses all eligible free workers, up to eight, regardless of the endpoint selectors.
 2. Review the confirmation and run the test. Each direction creates and removes its own pods and ResourceClaims.
-3. Compare bandwidth and latency alongside the test date, profile and baseline conditions. Blank cells mean the pair wasn’t tested.
+3. Compare bandwidth and latency alongside the test date, profile and baseline conditions. Blank cells mean the pair wasn't tested.
 4. If a pair fails, inspect its result and clean up any retained validation resources. Completed pairs remain in the returned result. An operator interruption can lose samples still held in memory. Start a new sweep when ready.
 
 ## MPI launch and transport
