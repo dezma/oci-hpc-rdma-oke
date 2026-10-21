@@ -1,73 +1,83 @@
 title: OCI OKE RDMA Quickstart
-description: Deploy a private, Resource Manager-owned OKE environment for CPU RDMA workloads with managed nodes in an OCI Compute Cluster and a Bastion-only RDMA Control Center.
-stackDescription: Enhanced OKE, managed CPU RDMA nodes, native NVIDIA Network Operator SR-IOV/VF workflow, private operator VM and guided RDMA configuration/validation.
-informationalText: Resource Manager builds the OKE RDMA platform. The private Control Center discovers the live RDMA PF/MTU, configures SR-IOV VFs and the VF network, and runs cross-node validation after deployment. Kubernetes minor and the Ubuntu OKE node package are derived automatically from the selected OKE version using Oracle's compatibility matrix.
-instructions: After Apply, create the Bastion port-forwarding session, run the returned SSH tunnel on your workstation, open the Control Center URL, retrieve the workspace token from the private operator with the generated command, query managed-node health, then configure and validate SR-IOV in stages.
-troubleshooting: If Apply succeeds but the UI is not ready, use the generated managed-SSH Bastion command and inspect /var/lib/oke-rdma-control/bootstrap-status.json and /var/log/oke-rdma-control-bootstrap.log. Do not expose port 8000 publicly to troubleshoot.
+description: Deploy a private, Resource Manager-owned OKE environment for CPU RDMA
+  workloads with managed nodes in an OCI Compute Cluster and a Bastion-only RDMA Control
+  Center.
+stackDescription: Private OKE CPU HPC platform with Dranet IPvlan, DRA claims, and
+  an operations workspace.
+informationalText: 'Deploy infrastructure, then follow the guided Control Center workflow:
+  configuration, host readiness, Dranet installation, and cross-node RDMA measurement.'
+instructions: After Apply, use the generated Bastion commands to access the private
+  Control Center. SSH and port-forwarding TTLs are independently configurable, with
+  two-hour defaults.
+troubleshooting: If Apply succeeds but the UI is not ready, use the generated managed-SSH
+  Bastion command and inspect /var/lib/oke-rdma-control/bootstrap-status.json and
+  /var/log/oke-rdma-control-bootstrap.log. Do not expose port 8000 publicly to troubleshoot.
 schemaVersion: 1.1.0
-version: "1.2.0"
-packageVersion: "1.2.0"
+version: 2.8.2
+packageVersion: 2.8.2
 locale: en
 allowViewState: false
 primaryOutputButton: ${operator_ui_url_after_tunnel}
-
 variableGroups:
-  - title: Deployment
-    variables:
-      - tenancy_ocid
-      - compartment_ocid
-      - region
-      - name_prefix
-      - availability_domain
-  - title: Private access
-    variables:
-      - bastion_client_cidr
-      - operator_kubernetes_access_mode
-  - title: Optional break-glass worker SSH
-    variables:
-      - enable_worker_ssh_from_operator
-      - worker_ssh_public_key
-  - title: OKE and CPU RDMA workers
-    variables:
-      - kubernetes_version
-      - ubuntu_release
-      - hpc_custom_image_ocid
-      - node_shape
-      - node_count
-      - node_boot_volume_gbs
-  - title: OKE RDMA add-ons
-    variables:
-      - enable_nvidia_network_operator
-  - title: Advanced add-on overrides
-    visible: ${enable_nvidia_network_operator}
-    variables:
-      - nfd_addon_name_override
-      - nvidia_network_operator_addon_name_override
-      - nvidia_network_operator_version
-  - title: Advanced networking
-    variables:
-      - vcn_cidr
-      - api_subnet_cidr
-      - worker_subnet_cidr
-      - pod_subnet_cidr
-      - service_lb_subnet_cidr
-      - operator_subnet_cidr
-      - bastion_subnet_cidr
-      - services_cidr
-      - max_pods_per_node
-  - title: Advanced operator VM
-    variables:
-      - operator_shape
-      - operator_shape_ocpus
-      - operator_shape_memory_gbs
-      - operator_boot_volume_gbs
-      - operator_image_ocid
-      - operator_bootstrap_generation
-  - title: Internal Resource Manager controls
-    visible: false
-    variables:
-      - oke_cluster_option_id
-
+- title: Deployment
+  variables:
+  - tenancy_ocid
+  - compartment_ocid
+  - region
+  - name_prefix
+  - availability_domain
+- title: Private access
+  variables:
+  - bastion_client_cidr
+  - operator_kubernetes_access_mode
+  - bastion_ssh_session_ttl_minutes
+  - bastion_port_forwarding_session_ttl_minutes
+- title: Optional break-glass worker SSH
+  variables:
+  - enable_worker_ssh_from_operator
+  - worker_ssh_public_key
+- title: IAM policies and operator identity
+  variables:
+  - create_operator_dynamic_group
+  - existing_operator_dynamic_group_ocid
+  - create_operator_policy
+  - create_nodepool_compute_cluster_policy
+  - create_capacity_compartment_policy
+  - create_capacity_tenancy_policy
+- title: Optional capacity management
+  variables:
+  - capacity_stack_ocid
+- title: OKE and CPU RDMA workers
+  variables:
+  - kubernetes_version
+  - ubuntu_release
+  - hpc_custom_image_ocid
+  - node_shape
+  - node_count
+  - node_boot_volume_gbs
+- title: Advanced networking
+  variables:
+  - vcn_cidr
+  - api_subnet_cidr
+  - worker_subnet_cidr
+  - pod_subnet_cidr
+  - service_lb_subnet_cidr
+  - operator_subnet_cidr
+  - bastion_subnet_cidr
+  - services_cidr
+  - max_pods_per_node
+- title: Advanced operator VM
+  variables:
+  - operator_shape
+  - operator_shape_ocpus
+  - operator_shape_memory_gbs
+  - operator_boot_volume_gbs
+  - operator_image_ocid
+  - operator_bootstrap_generation
+- title: Internal Resource Manager controls
+  visible: false
+  variables:
+  - oke_cluster_option_id
 variables:
   tenancy_ocid:
     type: oci:identity:tenancy:id
@@ -84,39 +94,49 @@ variables:
   name_prefix:
     type: string
     title: Environment name
-    description: Short lowercase name used for resources and the Control Center approval phrase.
-    pattern: "^[a-z][a-z0-9-]{2,23}$"
+    description: Short lowercase name used for resources and the Control Center approval
+      phrase.
+    pattern: ^[a-z][a-z0-9-]{2,23}$
     default: oke-rdma
     required: true
   availability_domain:
     type: oci:identity:availabilitydomain:name
     title: Availability domain
-    description: Select the AD in which the Compute Cluster and the CPU RDMA shape are available.
+    description: Select the AD in which the Compute Cluster and the CPU RDMA shape
+      are available.
     dependsOn:
       compartmentId: compartment_ocid
     required: true
   bastion_client_cidr:
     type: string
     title: Administrator source CIDR
-    description: Public workstation or corporate VPN CIDR allowed to create Bastion sessions. Prefer a /32 for one workstation.
+    description: Public workstation or corporate VPN CIDR allowed to create Bastion
+      sessions. Prefer a /32 for one workstation.
     required: true
   operator_kubernetes_access_mode:
     type: enum
     title: Operator Kubernetes access
-    enum: [iam_admin, least_privilege_rbac]
+    enum:
+    - iam_admin
+    - least_privilege_rbac
     default: iam_admin
-    description: iam_admin is the frictionless single-operator quickstart path and is scoped to this cluster. least_privilege_rbac requires a one-time generated ClusterRoleBinding applied by a cluster administrator.
+    description: iam_admin is the frictionless single-operator quickstart path and
+      is scoped to this cluster. least_privilege_rbac requires a one-time generated
+      ClusterRoleBinding applied by a cluster administrator.
     required: true
   enable_worker_ssh_from_operator:
     type: boolean
     title: Enable break-glass worker SSH from the operator
-    description: Optional. Opens TCP/22 only from the operator NSG to the RDMA worker NSG. Normal Control Center operation and node health queries do not use SSH.
+    description: Optional. Opens TCP/22 only from the operator NSG to the RDMA worker
+      NSG. Normal Control Center operation and node health queries do not use SSH.
     default: false
     required: true
   worker_ssh_public_key:
     type: string
     title: Worker SSH public key
-    description: Required only when break-glass worker SSH is enabled. Paste an OpenSSH public key; keep the private key on your workstation and use SSH agent forwarding through the operator. Existing nodes receive key changes only through node cycling/replacement.
+    description: Required only when break-glass worker SSH is enabled. Paste an OpenSSH
+      public key; keep the private key on your workstation and use SSH agent forwarding
+      through the operator. Existing nodes receive key changes only through node cycling/replacement.
     visible: ${enable_worker_ssh_from_operator}
     required: false
   oke_cluster_option_id:
@@ -128,7 +148,9 @@ variables:
   kubernetes_version:
     type: oci:kubernetes:versions:id
     title: OKE Kubernetes version
-    description: Select the full OKE patch. The quickstart derives the Kubernetes minor, Ubuntu repository path and compatible Oracle Ubuntu OKE node package automatically.
+    description: Select the full OKE patch. The quickstart derives the Kubernetes
+      minor, Ubuntu repository path and compatible Oracle Ubuntu OKE node package
+      automatically.
     dependsOn:
       compartmentId: compartment_ocid
       clusterOptionId: oke_cluster_option_id
@@ -136,20 +158,26 @@ variables:
   ubuntu_release:
     type: enum
     title: Ubuntu release used by the HPC custom image
-    enum: [ubuntu-noble, ubuntu-jammy]
+    enum:
+    - ubuntu-noble
+    - ubuntu-jammy
     default: ubuntu-noble
-    description: "Ubuntu 24.04 Noble or Ubuntu 22.04 Jammy. Oracle compatibility matrix: https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengCompatibilitymatrix_topic.htm"
+    description: 'Ubuntu 24.04 Noble or Ubuntu 22.04 Jammy. Oracle compatibility matrix:
+      https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengCompatibilitymatrix_topic.htm'
     required: true
   hpc_custom_image_ocid:
     type: string
     title: Ubuntu HPC custom image OCID
-    description: Paste the OCID of the approved Ubuntu HPC custom image. It must contain the compatible RDMA/OFED stack and Oracle Cloud Agent. Terraform validates image/shape/AD compatibility but cannot prove OFED readiness.
-    pattern: "^ocid1\\.image\\..+$"
+    description: Paste the OCID of the approved Ubuntu HPC custom image. It must contain
+      the compatible RDMA/OFED stack and Oracle Cloud Agent. Terraform validates image/shape/AD
+      compatibility but cannot prove OFED readiness.
+    pattern: ^ocid1\.image\..+$
     required: true
   node_shape:
     type: oci:core:instanceshape:name
     title: CPU RDMA bare-metal shape
-    description: Choose a CPU-only shape that supports RDMA and Compute Clusters. Terraform rejects shapes whose live catalog entry has no RDMA ports or has GPUs.
+    description: Choose a CPU-only shape that supports RDMA and Compute Clusters.
+      Terraform rejects shapes whose live catalog entry has no RDMA ports or has GPUs.
     default: BM.Optimized3.36
     dependsOn:
       compartmentId: compartment_ocid
@@ -157,8 +185,8 @@ variables:
   node_count:
     type: integer
     title: RDMA workers
-    description: Two is the minimum for a real cross-node test.
-    minimum: 2
+    description: Zero pauses worker capacity; one is allowed. Cross-node RDMA validation requires two ready workers.
+    minimum: 0
     maximum: 64
     multipleOf: 1
     default: 2
@@ -168,29 +196,6 @@ variables:
     title: Worker boot volume GiB
     minimum: 50
     default: 100
-    required: true
-  enable_nvidia_network_operator:
-    type: boolean
-    title: Install native OKE NVIDIA Network Operator
-    description: Enables the native OKE NFD and NVIDIA Network Operator add-ons. The operator is configured for SR-IOV Network Operator-managed VF creation. PF/MTU/VF/network values are intentionally configured later from the live Control Center.
-    default: true
-    required: true
-  nfd_addon_name_override:
-    type: string
-    title: Node Feature Discovery add-on name override
-    description: Leave empty to auto-discover from live OKE add-on options.
-    required: false
-  nvidia_network_operator_addon_name_override:
-    type: string
-    title: NVIDIA Network Operator add-on name override
-    description: Leave empty to auto-discover from live OKE add-on options.
-    required: false
-  nvidia_network_operator_version:
-    type: enum
-    title: NVIDIA Network Operator version
-    enum: [25.10.0-1, 25.7.0, 25.4.0]
-    default: 25.10.0-1
-    description: OKE requires an explicit NvidiaNetworkOperator version. The UI shows the prefix-free form (for example 25.10.0-1); Terraform resolves it to the exact live OKE spelling returned by add-on options (for example v25.10.0-1) before installation.
     required: true
   vcn_cidr:
     type: string
@@ -266,18 +271,84 @@ variables:
   operator_image_ocid:
     type: oci:core:image:id
     title: Approved operator image override
-    description: Optional Oracle Linux 9 image override. Leave empty to auto-select the newest compatible Oracle Linux 9 platform image.
+    description: Select a specific approved Oracle Linux 9 image by name. Resource Manager
+      stores its OCID. For an existing stack, select the image already recorded for
+      the operator; do not select a newer image during worker scaling.
     dependsOn:
       compartmentId: compartment_ocid
-    required: false
+    required: true
   operator_bootstrap_generation:
     type: integer
     title: Operator bootstrap generation
-    description: Increment only when intentionally replacing the private operator VM to install a new packaged Control Center payload.
+    description: Increment only when intentionally replacing the private operator
+      VM to install a new packaged Control Center payload.
     minimum: 1
     default: 1
     required: true
-
+  bastion_ssh_session_ttl_minutes:
+    type: integer
+    title: Managed SSH session TTL (minutes)
+    minimum: 30
+    maximum: 180
+    multipleOf: 1
+    default: 120
+    required: true
+    description: Applies to newly created sessions. Existing sessions keep their original
+      expiry.
+  bastion_port_forwarding_session_ttl_minutes:
+    type: integer
+    title: Port-forwarding session TTL (minutes)
+    minimum: 30
+    maximum: 180
+    multipleOf: 1
+    default: 120
+    required: true
+    description: Applies to newly created sessions. Existing sessions keep their original
+      expiry.
+  capacity_stack_ocid:
+    type: string
+    title: Owning Resource Manager stack OCID
+    default: ''
+    description: Optional. Enables reviewed scaling through this stack. The switches below
+      control creation of its IAM policies. Create the
+      stack without Apply, then enter its OCID before initial Apply. Leave empty to
+      keep scaling disabled.
+    pattern: ^$|^ocid1[.]ormstack[.][A-Za-z0-9._-]+$
+  create_capacity_compartment_policy:
+    type: boolean
+    title: Create compartment-level scaling policy
+    default: true
+    description: Used when the owning stack OCID is set. Clear to use externally supplied
+      permissions for the operator instance. This does not grant or verify access.
+      Clearing an already managed policy plans its deletion; review the plan.
+  create_capacity_tenancy_policy:
+    type: boolean
+    title: Create tenancy-level scaling policy
+    default: true
+    description: Used when the owning stack OCID is set. Clear to use externally supplied
+      permissions for the operator instance. This does not grant or verify access.
+      Clearing an already managed policy plans its deletion; review the plan.
+  create_operator_dynamic_group:
+    type: boolean
+    title: Create operator dynamic group
+    default: true
+    description: Clear to reuse an existing dynamic group. Supply its OCID and ensure its matching rule includes the operator VM. Disabling a resource already managed by this stack plans its deletion.
+  create_operator_policy:
+    type: boolean
+    title: Create baseline operator policy
+    default: true
+    description: Clear when existing policies grant the operator OKE access, instance/agent inspection and payload object download. Disabling a resource already managed by this stack plans its deletion.
+  create_nodepool_compute_cluster_policy:
+    type: boolean
+    title: Create OKE node-pool Compute Cluster policy
+    default: true
+    description: Clear only when existing policies authorize the node-pool principal to launch instances in this Compute Cluster. Operator dynamic-group permissions do not replace this grant. Disabling a resource already managed by this stack plans its deletion.
+  existing_operator_dynamic_group_ocid:
+    type: string
+    title: Existing operator dynamic group OCID
+    default: ''
+    description: Required when Create operator dynamic group is cleared. Leave empty when creating a group. No IAM lookup is performed.
+    pattern: ^$|^ocid1[.]dynamicgroup[.][A-Za-z0-9._-]+$
 outputs:
   operator_ui_url_after_tunnel:
     type: link

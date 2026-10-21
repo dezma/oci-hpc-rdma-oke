@@ -1,33 +1,20 @@
-# Sources reviewed
+# Primary references
 
-Reviewed for the October 2026 quickstart design:
+Use the pinned Dranet documentation with this release. Verify OCI regional availability and image compatibility when choosing infrastructure inputs.
 
-- OKE managed nodes in OCI Compute Clusters  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengusingcomputeclusters.htm
-- NVIDIA Network Operator add-on configuration arguments  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/configuration-arguments-nvidia-network-operator.htm
-- OKE supported add-on versions  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengconfiguringclusteraddons-supportedversions.htm
-- OKE Ubuntu node package compatibility matrix  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengCompatibilitymatrix_topic.htm
-- Running Ubuntu on OKE workers using custom images  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengcreatingubuntubasedworkernodes.htm
-- Supported OKE Kubernetes versions  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengaboutk8sversions.htm
-- OKE access control and IAM  
-  https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengaboutaccesscontrol.htm
-- OKE IAM policy reference  
-  https://docs.oracle.com/en-us/iaas/Content/Identity/Reference/contengpolicyreference.htm
-- OCI Core IAM resource types, including Instance Agent  
-  https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/corepolicyreference_topic-ResourceTypes.htm
-- OCI Terraform node-pool resource (`compute_cluster_id`, `ssh_public_key`)  
-  https://docs.oracle.com/en-us/iaas/tools/terraform-provider-oci/latest/docs/r/containerengine_node_pool.html
-- Connecting to OCI Bastion sessions  
-  https://docs.oracle.com/en-us/iaas/Content/Bastion/Tasks/connectingtosessions.htm
-- OCI Cloud Agent HPC/RDMA plugin operations  
-  https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/transitioning-to-hpc-plugin.htm
-- SR-IOV Network Operator upstream node-state and policy model  
-  https://github.com/k8snetworkplumbingwg/sriov-network-operator  
-  https://github.com/k8snetworkplumbingwg/sriov-network-operator/blob/master/doc/quickstart.md
+- [Dranet v1.5.0 OKE profile](https://github.com/kubernetes-sigs/dranet/blob/v1.5.0/site/content/docs/user/oci-oke-rdma.md) — OKE prerequisites, IPvlan, shared devices, allocation and child addressing.
+- [Dranet v1.5.0 Helm chart](https://github.com/kubernetes-sigs/dranet/tree/v1.5.0/deployments/helm/dranet) — chart values and runtime requirements.
+- [Oracle HPC OKE quickstart](https://github.com/oracle-quickstart/oci-hpc-oke) — HPC infrastructure and Kubernetes integration examples.
+- [Kubernetes Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) — DeviceClass, ResourceSlice, ResourceClaim and scheduling concepts.
+- [OCI Ubuntu node-package compatibility](https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengCompatibilitymatrix_topic.htm) — selecting the package for an OKE minor version.
+- [OCI Bastion port-forwarding sessions](https://docs.oracle.com/en-us/iaas/Content/Bastion/Tasks/create-session-port-forwarding.htm) — session creation, connection and lifetime.
+- [OCI service limits](https://docs.oracle.com/en-us/iaas/Content/General/service-limits/default.htm) — Resource Manager stack ZIP upload limit.
+- [OCI Resource Manager](https://docs.oracle.com/en-us/iaas/Content/ResourceManager/home.htm) — stacks, jobs, Terraform configuration and state.
 
-The Terraform compatibility map and pinned add-on choices are intentionally explicit and must be reviewed when Oracle changes supported Kubernetes/add-on versions.
+The dependency lock in `control/vendor/lock.json` records the release versions and SHA-256 hashes used to build the operator payload. Third-party licenses are retained in `control/vendor/`.
+
+- [Oracle BM.Optimized3.36 OSU Micro-Benchmarks tutorial](https://oracle-japan.github.io/ocitutorials/hpc/benchmark/run-omb-hpc/): shape-specific latency and bandwidth reference, with explicit benchmark settings.
+
+- [Resource Manager API and permission reference](https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/resourcemanagerpolicyreference.htm): stack/job permissions and PLAN/APPLY restrictions.
+- [Resource Manager security](https://docs.oracle.com/en-us/iaas/Content/Security/Reference/resourcemanager_security.htm): resource access required by Terraform jobs.
+- [OKE node-pool scaling](https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengscalingnodepools.htm): Compute Cluster placement and managed pool resizing.

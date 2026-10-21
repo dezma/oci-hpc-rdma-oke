@@ -71,6 +71,8 @@ for attempt in $(seq 1 10); do
   fi
   sleep 15
 done
+curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${kubernetes_version}/bin/linux/amd64/kubectl.sha256"
+printf '%s  /usr/local/bin/kubectl\n' "$(cat /tmp/kubectl.sha256)" | sha256sum -c -
 chmod 0755 /usr/local/bin/kubectl
 /usr/local/bin/kubectl version --client=true
 
@@ -93,11 +95,8 @@ cat > "$ETC_DIR/config.json" <<'JSON'
   "cluster_name": "${cluster_name}",
   "node_pool_id": "${node_pool_id}",
   "compute_cluster_id": "${compute_cluster_id}",
+  "capacity_stack_ocid": "${capacity_stack_ocid}",
   "kubeconfig": "/etc/oke-rdma-control/kube/config",
-  "sriov_operator_namespace": "${sriov_operator_namespace}",
-  "nfd_addon_name": "${nfd_addon_name}",
-  "cert_manager_addon_name": "${cert_manager_addon_name}",
-  "network_operator_addon_name": "${network_operator_addon_name}",
   "operator_kubernetes_access_mode": "${operator_kubernetes_access_mode}",
   "kubernetes_version": "${kubernetes_version}",
   "kubernetes_minor": "${kubernetes_minor}",
@@ -105,6 +104,11 @@ cat > "$ETC_DIR/config.json" <<'JSON'
   "oke_node_package": "${oke_node_package}",
   "oke_repo_url": "${oke_repo_url}",
   "worker_ssh_enabled": ${worker_ssh_enabled},
+  "bastion_ssh_ttl_seconds": ${bastion_ssh_ttl_seconds},
+  "bastion_port_forwarding_ttl_seconds": ${bastion_port_forwarding_ttl_seconds},
+  "vcn_cidr": "${vcn_cidr}",
+  "services_cidr": "${services_cidr}",
+  "worker_subnet_cidr": "${worker_subnet_cidr}",
   "mode": "live"
 }
 JSON
@@ -147,14 +151,25 @@ fi
 write_status "application" "running" "Installing the immutable control-center payload"
 rm -rf "$APP_DIR"/*
 tar -xzf "$PAYLOAD" -C "$APP_DIR"
+(cd "$APP_DIR" && sha256sum -c PAYLOAD-SHA256SUMS)
+# Fetch large runtime dependencies over NAT and verify them against the shipped locks.
+write_status "runtime-tools" "running" "Downloading and verifying the pinned Helm executable"
+bash "$APP_DIR/bootstrap/fetch-vendor.sh"
+install -m 0755 "$APP_DIR/vendor/helm" /usr/local/bin/helm
+/usr/local/bin/helm version --short
+write_status "runtime-python" "running" "Downloading and verifying pinned Python runtime wheels"
 python3.11 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-if compgen -G "$APP_DIR/wheelhouse/*.whl" >/dev/null; then
-  "$APP_DIR/venv/bin/pip" install --no-index --find-links "$APP_DIR/wheelhouse" -r "$APP_DIR/requirements.lock"
-else
-  echo "WARNING: development payload has no vendored wheelhouse; using NAT to install pinned requirements."
-  "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.lock"
-fi
+RUNTIME_WHEELS=$(mktemp -d)
+"$APP_DIR/venv/bin/python" -m pip download \
+  --disable-pip-version-check --retries 5 --timeout 60 \
+  --require-hashes --only-binary=:all: --python-version 311 --implementation cp --abi cp311 \
+  --platform manylinux2014_x86_64 --platform manylinux_2_28_x86_64 \
+  -r "$APP_DIR/runtime-requirements.lock" --dest "$RUNTIME_WHEELS"
+"$APP_DIR/venv/bin/python" -m pip install \
+  --disable-pip-version-check --no-index --find-links "$RUNTIME_WHEELS" \
+  --require-hashes --only-binary=:all: -r "$APP_DIR/runtime-requirements.lock"
+rm -rf "$RUNTIME_WHEELS"
+"$APP_DIR/venv/bin/python" -m pip check
 "$APP_DIR/venv/bin/oci" --version
 
 write_status "kubeconfig" "running" "Generating a private-endpoint kubeconfig with instance-principal auth context"
@@ -217,8 +232,14 @@ WorkingDirectory=/opt/oke-rdma-control
 Environment=HPC_CONTROL_CONFIG=/etc/oke-rdma-control/config.json
 Environment=HPC_CONTROL_TOKEN_FILE=/etc/oke-rdma-control/admin.token
 Environment=HPC_CONTROL_DB=/var/lib/oke-rdma-control/control.db
+Environment=HPC_CONTROL_STATE_DIR=/var/lib/oke-rdma-control
+Environment=HELM_CACHE_HOME=/var/lib/oke-rdma-control/helm/cache
+Environment=HELM_CONFIG_HOME=/var/lib/oke-rdma-control/helm/config
+Environment=HELM_DATA_HOME=/var/lib/oke-rdma-control/helm/data
 Environment=HPC_CONTROL_RDMA_CONFIG=/var/lib/oke-rdma-control/rdma-config.json
+Environment=HPC_CONTROL_REPORT_DIR=/var/lib/oke-rdma-control/reports/node-diagnostics
 Environment=KUBECONFIG=/etc/oke-rdma-control/kube/config
+Environment=KUBECTL_KUBERC=false
 Environment=OCI_CLI_AUTH=instance_principal
 Environment=PATH=/opt/oke-rdma-control/venv/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 ExecStart=/opt/oke-rdma-control/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
@@ -248,8 +269,14 @@ WorkingDirectory=/opt/oke-rdma-control
 Environment=HPC_CONTROL_CONFIG=/etc/oke-rdma-control/config.json
 Environment=HPC_CONTROL_TOKEN_FILE=/etc/oke-rdma-control/admin.token
 Environment=HPC_CONTROL_DB=/var/lib/oke-rdma-control/control.db
+Environment=HPC_CONTROL_STATE_DIR=/var/lib/oke-rdma-control
+Environment=HELM_CACHE_HOME=/var/lib/oke-rdma-control/helm/cache
+Environment=HELM_CONFIG_HOME=/var/lib/oke-rdma-control/helm/config
+Environment=HELM_DATA_HOME=/var/lib/oke-rdma-control/helm/data
 Environment=HPC_CONTROL_RDMA_CONFIG=/var/lib/oke-rdma-control/rdma-config.json
+Environment=HPC_CONTROL_REPORT_DIR=/var/lib/oke-rdma-control/reports/node-diagnostics
 Environment=KUBECONFIG=/etc/oke-rdma-control/kube/config
+Environment=KUBECTL_KUBERC=false
 Environment=OCI_CLI_AUTH=instance_principal
 Environment=PATH=/opt/oke-rdma-control/venv/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 ExecStart=/opt/oke-rdma-control/venv/bin/python -m app.worker

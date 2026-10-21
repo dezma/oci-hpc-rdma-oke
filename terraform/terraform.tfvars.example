@@ -18,12 +18,26 @@ node_count             = 2
 # Restrict this to the workstation or corporate VPN that creates Bastion sessions.
 bastion_client_cidr = "203.0.113.10/32"
 
-# PF, MTU, VF count, Kubernetes resource name, NVIDIA IPAM pool and the immutable
-# RDMA validation image are discovered/configured after deployment in the Control Center.
-
-nvidia_network_operator_version = "25.10.0-1"
+# Dranet configuration and tools image are set in the Control Center.
+bastion_ssh_session_ttl_minutes = 120
+bastion_port_forwarding_session_ttl_minutes = 120
 
 # Optional break-glass access from the private operator VM to workers.
 # Normal Control Center node diagnostics use Kubernetes and OCI APIs and do not need SSH.
 enable_worker_ssh_from_operator = false
 worker_ssh_public_key            = ""
+
+# Optional scaling: keep the owning stack OCID configured when reusing IAM.
+# These switches affect only the additional scaling policies.
+create_capacity_compartment_policy = true
+create_capacity_tenancy_policy     = true
+
+# IAM provisioning: disable individual resources when supplied externally.
+create_operator_dynamic_group = true
+existing_operator_dynamic_group_ocid = ""
+create_operator_policy = true
+create_nodepool_compute_cluster_policy = true
+
+# Pin a specific approved Oracle Linux 9 image compatible with operator_shape.
+# For existing environments, use the operator image recorded in Terraform state.
+operator_image_ocid = "ocid1.image.oc1.eu-frankfurt-1.example"

@@ -73,13 +73,13 @@ variable "node_shape" {
 }
 
 variable "node_count" {
-  description = "Number of managed RDMA workers. Two is the minimum useful cross-node validation size."
+  description = "Number of managed RDMA workers (0–64). Default two; cross-node validation requires two ready workers."
   type        = number
   default     = 2
 
   validation {
-    condition     = var.node_count >= 2 && var.node_count <= 64
-    error_message = "node_count must be between 2 and 64."
+    condition     = var.node_count >= 0 && var.node_count <= 64 && floor(var.node_count) == var.node_count
+    error_message = "node_count must be between 0 and 64."
   }
 }
 
@@ -96,35 +96,6 @@ variable "node_boot_volume_gbs" {
 variable "max_pods_per_node" {
   type    = number
   default = 31
-}
-
-variable "enable_nvidia_network_operator" {
-  description = "Install the native OKE Node Feature Discovery and NVIDIA Network Operator add-ons."
-  type        = bool
-  default     = true
-}
-
-variable "nfd_addon_name_override" {
-  description = "Optional exact OKE add-on name. Leave empty to auto-discover an add-on whose name/description matches Node Feature Discovery."
-  type        = string
-  default     = ""
-}
-
-variable "nvidia_network_operator_addon_name_override" {
-  description = "Optional exact OKE add-on name. Leave empty to auto-discover the NVIDIA Network Operator for the selected Kubernetes version."
-  type        = string
-  default     = ""
-}
-
-variable "nvidia_network_operator_version" {
-  description = "Explicit NVIDIA Network Operator add-on version. The Resource Manager UI uses the prefix-free form (for example 25.10.0-1); Terraform matches it to the exact live OKE add-on version spelling (for example v25.10.0-1) before installation."
-  type        = string
-  default     = "25.10.0-1"
-
-  validation {
-    condition     = trimspace(var.nvidia_network_operator_version) != ""
-    error_message = "nvidia_network_operator_version must not be empty when the NVIDIA Network Operator is enabled."
-  }
 }
 
 variable "bastion_client_cidr" {
@@ -174,9 +145,13 @@ variable "operator_boot_volume_gbs" {
 }
 
 variable "operator_image_ocid" {
-  description = "Optional approved Oracle Linux operator image OCID. Empty selects the newest available Oracle Linux 9 image compatible with the operator shape."
+  description = "Required pinned Oracle Linux 9 operator image OCID. In Resource Manager select Approved operator image override by name. Retain the existing image when scaling workers."
   type        = string
-  default     = ""
+
+  validation {
+    condition     = can(regex("^ocid1[.]image[.]", var.operator_image_ocid))
+    error_message = "Select an explicit approved operator image. Automatic newest-image selection is not supported."
+  }
 }
 
 variable "operator_kubernetes_access_mode" {
@@ -241,5 +216,75 @@ variable "freeform_tags" {
   default = {
     project    = "oci-oke-rdma-quickstart"
     managed-by = "resource-manager"
+  }
+}
+
+variable "bastion_ssh_session_ttl_minutes" {
+  description = "Managed SSH session lifetime in minutes (30-180)."
+  type        = number
+  default     = 120
+  validation {
+    condition     = var.bastion_ssh_session_ttl_minutes >= 30 && var.bastion_ssh_session_ttl_minutes <= 180 && floor(var.bastion_ssh_session_ttl_minutes) == var.bastion_ssh_session_ttl_minutes
+    error_message = "SSH TTL must be a whole number of minutes from 30 through 180."
+  }
+}
+
+variable "bastion_port_forwarding_session_ttl_minutes" {
+  description = "UI and private Kubernetes API port-forwarding session lifetime in minutes (30-180)."
+  type        = number
+  default     = 120
+  validation {
+    condition     = var.bastion_port_forwarding_session_ttl_minutes >= 30 && var.bastion_port_forwarding_session_ttl_minutes <= 180 && floor(var.bastion_port_forwarding_session_ttl_minutes) == var.bastion_port_forwarding_session_ttl_minutes
+    error_message = "Port-forwarding TTL must be a whole number of minutes from 30 through 180."
+  }
+}
+
+variable "capacity_stack_ocid" {
+  type        = string
+  default     = ""
+  description = "Optional owning Resource Manager stack OCID. Enables reviewed UI capacity management. Separate switches control creation of its IAM policies."
+  validation {
+    condition     = var.capacity_stack_ocid == "" || can(regex("^ocid1[.]ormstack[.][A-Za-z0-9._-]+$", var.capacity_stack_ocid))
+    error_message = "capacity_stack_ocid must be empty or a Resource Manager stack OCID."
+  }
+}
+
+variable "create_capacity_compartment_policy" {
+  type        = bool
+  default     = true
+  description = "Create the compartment-level capacity policy when capacity_stack_ocid is set. Disable only when equivalent access is supplied externally for the operator instance. Disabling an already managed policy plans its deletion."
+}
+
+variable "create_capacity_tenancy_policy" {
+  type        = bool
+  default     = true
+  description = "Create the tenancy-level capacity policy when capacity_stack_ocid is set. Disable only when equivalent access is supplied externally for the operator instance. Disabling an already managed policy plans its deletion."
+}
+
+variable "create_operator_policy" {
+  type        = bool
+  default     = true
+  description = "Create the baseline operator policy for OKE, node inspection and payload download. Disable only when the resource/access is supplied externally. Disabling an already managed resource plans its deletion."
+}
+
+variable "create_nodepool_compute_cluster_policy" {
+  type        = bool
+  default     = true
+  description = "Create the policy allowing the OKE node-pool principal to launch workers in the Compute Cluster. Disable only when the resource/access is supplied externally. Disabling an already managed resource plans its deletion."
+}
+
+variable "create_operator_dynamic_group" {
+  type        = bool
+  default     = true
+  description = "Create a dynamic group matching the operator VM. When false, provide existing_operator_dynamic_group_ocid and ensure its matching rule includes the operator. Disable only when the resource/access is supplied externally. Disabling an already managed resource plans its deletion."
+}
+
+variable "existing_operator_dynamic_group_ocid" {
+  type        = string
+  default     = ""
+  description = "Existing operator dynamic group OCID when creation is disabled. Used directly without an IAM lookup; verify membership and permissions separately."
+  validation {
+    condition     = var.existing_operator_dynamic_group_ocid == "" || can(regex("^ocid1[.]dynamicgroup[.][A-Za-z0-9._-]+$", var.existing_operator_dynamic_group_ocid))
+    error_message = "Enter a dynamic-group OCID starting with ocid1.dynamicgroup."
   }
 }

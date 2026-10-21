@@ -11,6 +11,10 @@ packages:
   - ${oke_node_package}
 
 write_files:
+  - path: /etc/modprobe.d/oke-rdma-netns.conf
+    permissions: '0644'
+    content: |
+      options ib_core netns_mode=1
   - path: /etc/oke-rdma-image-marker
     permissions: '0644'
     content: |
@@ -20,4 +24,6 @@ write_files:
 runcmd:
   - [ bash, -lc, "set -euxo pipefail; systemctl enable --now oracle-cloud-agent || true" ]
   - [ bash, -lc, "set -euxo pipefail; command -v ibv_devinfo >/dev/null 2>&1 && ibv_devinfo -l || true" ]
+  # Fresh nodes only: set live mode before any Kubernetes RDMA workloads exist.
+  - [ bash, -lc, "set -euxo pipefail; modprobe ib_core; rdma system set netns shared; update-initramfs -u -k $(uname -r)" ]
   - [ bash, -lc, "set -euxo pipefail; oke bootstrap" ]

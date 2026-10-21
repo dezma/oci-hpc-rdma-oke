@@ -6,19 +6,18 @@ resource "oci_core_compute_cluster" "rdma" {
 }
 
 resource "oci_identity_policy" "nodepool_compute_cluster" {
+  count          = var.create_nodepool_compute_cluster_policy ? 1 : 0
   compartment_id = var.compartment_ocid
   name           = "${var.name_prefix}-nodepool-compute-cluster"
   description    = "Allow this OKE managed node pool resource principal to launch workers into its OCI Compute Cluster."
   freeform_tags  = local.tags
 
-  statements = [
-    "allow any-user to {COMPUTE_CLUSTER_LAUNCH_INSTANCE} in compartment id ${var.compartment_ocid} where all {request.principal.type = 'nodepool', target.resource.id = '${oci_core_compute_cluster.rdma.id}'}"
-  ]
+  statements = local.nodepool_compute_cluster_statements
 }
 
 resource "oci_containerengine_cluster" "this" {
   depends_on         = [terraform_data.preflight]
-  compartment_id    = var.compartment_ocid
+  compartment_id     = var.compartment_ocid
   kubernetes_version = var.kubernetes_version
   name               = "${var.name_prefix}-oke"
   type               = "ENHANCED_CLUSTER"
@@ -83,7 +82,7 @@ resource "oci_containerengine_node_pool" "rdma" {
 
     placement_configs {
       availability_domain = var.availability_domain
-      subnet_id            = oci_core_subnet.private["workers"].id
+      subnet_id           = oci_core_subnet.private["workers"].id
       # Do not set fault domains when a Compute Cluster is used.
     }
 
@@ -100,8 +99,18 @@ resource "oci_containerengine_node_pool" "rdma" {
     value = "true"
   }
 
+  initial_node_labels {
+    key   = "oke-rdma-mode"
+    value = "dranet"
+  }
+
+  node_eviction_node_pool_settings {
+    eviction_grace_duration              = "PT60M"
+    is_force_delete_after_grace_duration = false
+  }
+
   node_pool_cycling_details {
-    is_node_cycling_enabled = true
+    is_node_cycling_enabled = false
     maximum_surge           = "1"
     maximum_unavailable     = "0"
   }
@@ -113,86 +122,8 @@ resource "oci_containerengine_node_pool" "rdma" {
   }
 }
 
-resource "oci_containerengine_addon" "nfd" {
-  count = var.enable_nvidia_network_operator ? 1 : 0
-
-  depends_on = [oci_containerengine_node_pool.rdma, terraform_data.preflight]
-
-  addon_name                       = local.nfd_addon_name
-  cluster_id                       = oci_containerengine_cluster.this.id
-  remove_addon_resources_on_delete = true
-  override_existing                = false
-}
-
-# Both the NVIDIA Network Operator admission controller and the SR-IOV
-# Network Operator admission controller use generated webhook certificates.
-# Install OKE Certificate Manager first so add-on installation does not race
-# against a missing certificate issuer/CRD dependency.
-resource "oci_containerengine_addon" "cert_manager" {
-  count = var.enable_nvidia_network_operator ? 1 : 0
-
-  depends_on = [oci_containerengine_node_pool.rdma, terraform_data.preflight]
-
-  addon_name                       = local.cert_manager_addon_name
-  cluster_id                       = oci_containerengine_cluster.this.id
-  remove_addon_resources_on_delete = true
-  override_existing                = false
-  version                          = local.cert_manager_resolved_version
-}
-
-resource "oci_containerengine_addon" "nvidia_network_operator" {
-  count = var.enable_nvidia_network_operator ? 1 : 0
-
-  depends_on = [
-    oci_containerengine_addon.nfd,
-    oci_containerengine_addon.cert_manager,
+locals {
+  nodepool_compute_cluster_statements = [
+    "allow any-user to {COMPUTE_CLUSTER_LAUNCH_INSTANCE} in compartment id ${var.compartment_ocid} where all {request.principal.type = 'nodepool', target.resource.id = '${oci_core_compute_cluster.rdma.id}'}"
   ]
-
-  addon_name                       = local.network_operator_addon_name
-  cluster_id                       = oci_containerengine_cluster.this.id
-  remove_addon_resources_on_delete = true
-  override_existing                = false
-  # Use the exact spelling returned by OKE add-on options (currently prefixed
-  # with `v`) rather than the user-facing normalized selector value.
-  version                          = local.network_operator_resolved_version
-
-  configurations {
-    key   = "operator.admissionControllers.enabled"
-    value = "true"
-  }
-
-  configurations {
-    key   = "sriovNetworkOperator.enabled"
-    value = "true"
-  }
-
-  configurations {
-    key   = "sriov-network-operator.operator.resourcePrefix"
-    value = "nvidia.com"
-  }
-
-  configurations {
-    key   = "sriov-network-operator.operator.admissionControllers.enabled"
-    value = "true"
-  }
-
-  configurations {
-    key   = "sriov-network-operator.operator.sriovOperatorConfig.configDaemonNodeSelectors"
-    value = jsonencode({
-      "kubernetes.io/os" = "linux"
-      "oci-rdma"         = "true"
-    })
-  }
-
-  configurations {
-    key   = "vfCreationMode"
-    value = "sriovNetworkOperator"
-  }
-
-  # NFD is installed and awaited as a separate OKE-managed add-on above.
-  # Tell Network Operator not to perform a redundant bundled/dependency check.
-  configurations {
-    key   = "skipNodeFeatureDiscoveryDependencyCheck"
-    value = "true"
-  }
 }

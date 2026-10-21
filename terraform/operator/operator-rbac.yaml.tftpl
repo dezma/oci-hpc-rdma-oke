@@ -9,14 +9,17 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
-  - apiGroups: ["sriovnetwork.openshift.io"]
-    resources: ["sriovnetworknodepolicies", "sriovnetworknodestates", "sriovnetworks"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "deviceclasses"]
     verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
-  - apiGroups: ["nv-ipam.nvidia.com"]
-    resources: ["ippools"]
-    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
-  - apiGroups: ["k8s.cni.cncf.io"]
-    resources: ["network-attachment-definitions"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -31,3 +34,63 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: oke-rdma-control-center
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rdma-workloads
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: oke-rdma-registry-check
+  namespace: rdma-workloads
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oke-rdma-registry-check
+  namespace: rdma-workloads
+subjects:
+- kind: Group
+  name: ${operator_dynamic_group_ocid}
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oke-rdma-registry-check
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oke-rdma-diagnostics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: oke-rdma-registry-check
+  namespace: oke-rdma-diagnostics
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oke-rdma-registry-check
+  namespace: oke-rdma-diagnostics
+subjects:
+- kind: Group
+  name: ${operator_dynamic_group_ocid}
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oke-rdma-registry-check

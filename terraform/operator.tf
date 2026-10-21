@@ -17,7 +17,7 @@ resource "oci_bastion_bastion" "operator" {
   target_subnet_id             = oci_core_subnet.private["bastion"].id
   name                         = "${var.name_prefix}-operator-bastion"
   client_cidr_block_allow_list = [var.bastion_client_cidr]
-  max_session_ttl_in_seconds   = 3600
+  max_session_ttl_in_seconds   = 60 * max(var.bastion_ssh_session_ttl_minutes, var.bastion_port_forwarding_session_ttl_minutes)
   freeform_tags                = local.tags
 }
 
@@ -60,31 +60,33 @@ resource "oci_core_instance" "operator" {
 
   metadata = {
     user_data = base64encode(templatefile("${path.module}/operator/cloud-init.sh.tftpl", {
-      region                       = var.region
-      tenancy_id                   = var.tenancy_ocid
-      compartment_id               = var.compartment_ocid
-      cluster_id                   = oci_containerengine_cluster.this.id
-      cluster_name                 = oci_containerengine_cluster.this.name
-      node_pool_id                 = oci_containerengine_node_pool.rdma.id
-      compute_cluster_id           = oci_core_compute_cluster.rdma.id
-      environment_name             = var.name_prefix
-      object_namespace             = data.oci_objectstorage_namespace.this.namespace
-      artifact_bucket              = oci_objectstorage_bucket.artifacts.name
-      artifact_object              = oci_objectstorage_object.operator_payload.object
-      artifact_sha256              = local.operator_payload_sha256
-      kubernetes_version              = var.kubernetes_version
-      kubernetes_minor                = local.kubernetes_minor
-      ubuntu_release                  = var.ubuntu_release
-      oke_node_package                = local.oke_node_package
-      oke_repo_url                    = local.ubuntu_repo_url
-      admin_token                     = random_password.operator_ui_token.result
-      sriov_operator_namespace        = "nvidia-network-operator"
-      nfd_addon_name                  = local.nfd_addon_name
-      cert_manager_addon_name         = local.cert_manager_addon_name
-      network_operator_addon_name     = local.network_operator_addon_name
-      operator_kubernetes_access_mode = var.operator_kubernetes_access_mode
-      worker_ssh_enabled              = var.enable_worker_ssh_from_operator
-      bastion_private_endpoint_ip     = oci_bastion_bastion.operator.private_endpoint_ip_address
+      region                              = var.region
+      tenancy_id                          = var.tenancy_ocid
+      compartment_id                      = var.compartment_ocid
+      cluster_id                          = oci_containerengine_cluster.this.id
+      cluster_name                        = oci_containerengine_cluster.this.name
+      node_pool_id                        = oci_containerengine_node_pool.rdma.id
+      compute_cluster_id                  = oci_core_compute_cluster.rdma.id
+      capacity_stack_ocid                 = var.capacity_stack_ocid
+      environment_name                    = var.name_prefix
+      object_namespace                    = data.oci_objectstorage_namespace.this.namespace
+      artifact_bucket                     = oci_objectstorage_bucket.artifacts.name
+      artifact_object                     = oci_objectstorage_object.operator_payload.object
+      artifact_sha256                     = local.operator_payload_sha256
+      kubernetes_version                  = var.kubernetes_version
+      kubernetes_minor                    = local.kubernetes_minor
+      ubuntu_release                      = var.ubuntu_release
+      oke_node_package                    = local.oke_node_package
+      oke_repo_url                        = local.ubuntu_repo_url
+      admin_token                         = random_password.operator_ui_token.result
+      operator_kubernetes_access_mode     = var.operator_kubernetes_access_mode
+      worker_ssh_enabled                  = var.enable_worker_ssh_from_operator
+      bastion_ssh_ttl_seconds             = 60 * var.bastion_ssh_session_ttl_minutes
+      bastion_port_forwarding_ttl_seconds = 60 * var.bastion_port_forwarding_session_ttl_minutes
+      vcn_cidr                            = var.vcn_cidr
+      services_cidr                       = var.services_cidr
+      worker_subnet_cidr                  = var.worker_subnet_cidr
+      bastion_private_endpoint_ip         = oci_bastion_bastion.operator.private_endpoint_ip_address
     }))
   }
 

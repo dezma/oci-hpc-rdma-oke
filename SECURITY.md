@@ -1,96 +1,22 @@
-# Security policy and operating model
+# Security and operating model
 
-## Default posture
+The OKE API, workers and operator VM are private. OCI Bastion is the administrator ingress path. Both OCI NSGs and the operator firewall restrict UI access; the UI remains on the private endpoint. Workspace tokens stay in browser memory, not local storage. Terraform state and operator SSH are privileged surfaces.
 
-- private OKE Kubernetes API endpoint;
-- private managed RDMA workers;
-- private operator VM with no public IP;
-- OCI Bastion as the human ingress path;
-- operator NSG and host `firewalld` both restrict TCP/8000 to the Bastion private endpoint `/32`;
-- operator instance principal instead of a user API-signing key;
-- optional worker SSH disabled by default;
-- live RDMA pods use `hostNetwork: false`, no host PID/IPC namespaces and `privileged: false`;
-- immutable validation image digest;
-- explicit server-side confirmation for mutating cluster actions;
-- Network Operator/SR-IOV admission controllers enabled;
-- SR-IOV config daemon constrained to Linux nodes labelled `oci-rdma=true`;
-- VF operations gated on live managed-node diagnostics and reconciliation.
+The default operator instance principal has cluster-scoped administrator access plus read access to OCI Compute/Instance Agent and the private payload object. The optional restricted Kubernetes role can operate curated workloads and diagnostics, but a cluster administrator must install Dranet's privileged DaemonSet/RBAC once. Restrict UI access to trusted stack administrators.
 
-## Operator identity
+Dranet infrastructure is privileged and uses host networking. RDMA workload pods use `hostNetwork: false`, no host PID/IPC, no service-account token, `privileged: false`, no privilege escalation, all capabilities dropped except IPC_LOCK. Devices are injected through DRA. Shared PF devices and IPvlan do not provide VF hardware isolation or a security boundary for mutually untrusted tenants.
 
-The operator dynamic group receives cluster-scoped OKE access plus narrowly scoped read access to:
+The API accepts only validated settings, fixed operations and release-shipped diagnostic profile identifiers. It has no arbitrary shell, SSH proxy, command arguments, manifest upload, node-reboot or node-drain endpoint. Mutating actions and privileged diagnostics require the environment name. The durable worker serializes operations, stores a configuration snapshot, renews leases and marks interrupted jobs failed rather than replaying mutations automatically.
 
-```text
-Compute instances
-OCI Instance Agent plugin status
-one immutable Object Storage payload object
-```
+Host diagnostics create bounded, short-lived privileged pods with a read-only host root mount and no service-account token. A read-only mount is not a complete sandbox for a privileged container. The protections are trusted administrator access, fixed reviewed scripts, immutable image digests, deadlines, cleanup and bounded/redacted report output. Reports do not intentionally open key or certificate-secret files. Review reports before external sharing.
 
-The read-only node-diagnostics endpoint uses those APIs and Kubernetes resources. It does not SSH to nodes or execute host commands.
+The payload contains application code, the pinned Dranet chart, dependency locks and checksums. Bootstrap checks the immutable payload and every file in its internal manifest. Helm is downloaded over HTTPS and verified against its pinned executable hash. Python 3.11 wheels are downloaded for explicit Linux x86_64 platform tags and installed with exact versions and required SHA-256 hashes. Workload images must use an immutable SHA-256 reference. OCI/OFED host drivers remain owned by the image and host agents.
 
-## Credentials and sensitive state
+This is a single-operator quickstart. Enterprise SSO, per-user authorization, tamper-resistant audit export, image signing policy, formal penetration/accessibility assessment and multi-replica persistence are separate production requirements. Infrastructure destruction, node replacement and disruptive maintenance remain reviewed Resource Manager/OKE administrator operations.
 
-Terraform generates a deployment-specific workspace token. It is:
 
-- a sensitive Resource Manager/Terraform output;
-- written root-owned to `/etc/oke-rdma-control/admin.token`;
-- entered into the browser and retained only in JavaScript memory.
+## Confirmed host recovery
 
-The browser never receives OCI API private keys, user auth tokens or kubeconfig content. Treat access to Resource Manager state and break-glass operator SSH as privileged.
+See [Recovery safety and interruption procedure](docs/RECOVERY.md). Recovery is a separate administrative mutation with a writable host mount, one fixed OCA restart, verified admission protection, durable intent, and fail-closed interruption handling. Workspace tokens authorize administrators; there is no per-person role/approval system. Restricted RBAC is not escalated. Coordinate an idle maintenance window.
 
-For broad multi-user production, replace the bootstrap token with enterprise OIDC/SSO and per-user authorization/audit.
-
-## Runtime command boundary
-
-The API exposes an allowlist of business operations:
-
-- environment and preflight;
-- read-only managed-node diagnostics;
-- read-only SR-IOV hardware discovery;
-- validated RDMA settings persistence;
-- reviewed VF-policy creation;
-- reviewed VF-network creation;
-- finite cross-node validation;
-- validation-pod cleanup.
-
-There is no generic command, SSH, node-shell or arbitrary-manifest endpoint. `kubectl` and `oci` are invoked using argument arrays assembled by code.
-
-## Host and network diagnostics
-
-The UI can display a generated, fully qualified `kubectl debug` command for a human administrator. It never executes that command. Such a debug pod is privileged and should be used only as an audited break-glass action.
-
-Optional worker SSH:
-
-- is disabled by default;
-- requires an explicit public key at provisioning time;
-- creates only an operator-NSG-to-worker-NSG TCP/22 ingress rule;
-- does not copy a private key onto the operator VM;
-- should be used with workstation-held keys and SSH agent forwarding.
-
-## High-risk operations
-
-Creating or removing `SriovNetworkNodePolicy` can drain, reconfigure or reboot nodes. The normal UI:
-
-- requires the exact environment name before creation;
-- revalidates Kubernetes readiness, OCI RDMA plugin state and PF/MTU/VF capability;
-- performs a server-side dry-run;
-- does not expose routine policy deletion/migration.
-
-Infrastructure destroy and managed-node replacement remain Resource Manager/OKE administrator operations.
-
-## Supply chain
-
-- Production operator payloads vendor pinned wheels.
-- The payload is uploaded to private Object Storage and SHA-256 verified by cloud-init.
-- The bootstrap OCI CLI is installed into a dedicated venv and version-checked.
-- RDMA validation images must use `repository@sha256:<digest>`.
-- Host OFED/kernel drivers are never installed from a workload container.
-
-## Remaining production gates
-
-- enterprise OIDC/SSO and role-based authorization;
-- actor-aware, tamper-resistant audit export;
-- signed-image policy and registry scanning;
-- formal penetration and WCAG testing;
-- managed database/queue for multi-replica operation;
-- reviewed node-replacement and VF-policy migration runbooks.
+Registry prerequisite checks request only secret type in command output. Kubernetes `get secrets` permission nevertheless permits reading full secret contents; it is not metadata-only authorization. The restricted-mode manifest scopes this permission to the two operational namespaces. Do not store unrelated secrets there. Existing restricted deployments must have an administrator review and apply the updated RBAC output.

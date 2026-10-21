@@ -1,194 +1,42 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>OKE RDMA Control Center</title>
-  <link rel="stylesheet" href="/static/styles.css">
-</head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>OKE HPC · Operations</title><link rel="stylesheet" href="/static/styles.css"><script src="/static/app.js" defer></script></head>
 <body>
-  <a class="skip" href="#main">Skip to main content</a>
-  <div class="shell">
-    <aside class="sidebar" aria-label="Primary navigation">
-      <div class="brand">
-        <span class="mark" aria-hidden="true">RD</span>
-        <div><strong>OKE RDMA</strong><small>Control Center</small></div>
-      </div>
-      <nav>
-        <button class="nav active" data-page="overview">Overview</button>
-        <button class="nav" data-page="nodes">Managed nodes</button>
-        <button class="nav" data-page="network">SR-IOV &amp; VFs</button>
-        <button class="nav" data-page="workloads">RDMA workloads</button>
-        <button class="nav" data-page="jobs">Activity</button>
-        <button class="nav" data-page="security">Security &amp; access</button>
-      </nav>
-      <div class="sidebar-note">Private operator UI<br>Accessed through OCI Bastion</div>
-    </aside>
+<section id="login" class="login"><div class="login-brand">O<span>H</span></div><p class="eyebrow">OCI · HIGH PERFORMANCE COMPUTING</p><h1>Cluster Administration</h1><p class="muted">Private access to deployment, fleet health, and hardware RDMA validation.</p><form id="login-form"><label for="token">Workspace token</label><input id="token" type="password" autocomplete="current-password" required><button type="submit">Open workspace <span aria-hidden="true">→</span></button><p id="login-error" class="error" role="alert"></p></form><small>Connect through your OCI Bastion tunnel.</small></section>
+<div id="app" hidden>
+<aside class="sidebar"><a class="brand" href="#overview"><span class="brand-icon">OH</span><span>OKE HPC<small>OPERATIONS WORKSPACE</small></span></a><p class="nav-label">WORKSPACE</p><nav aria-label="Workspace"><a class="active" href="#overview">Overview <span>01</span></a><a href="#workflow">Setup & validation <span>02</span></a><a href="#fleet">Workers & scaling <span>03</span></a><a href="#activity">Operations <span>04</span></a><a href="#maintenance">Maintenance <span>05</span></a></nav><div class="sidebar-note"><span class="pulse"></span> PRIVATE CONTROL PLANE<p>Dranet IPvlan<br>OCI RDMA fabric</p><small id="access-note">Bastion sessions · 2 hours</small></div><button id="logout" class="quiet">Lock workspace</button></aside>
+<main>
+<header class="topbar"><div><span class="crumb" id="page-name">Overview / </span><strong id="env-name">Loading…</strong></div><div class="top-actions"><span id="mode" class="badge">LIVE</span><button id="refresh" class="secondary">Refresh status</button></div></header>
+<div id="request-status" class="notice request-status" hidden role="status" aria-live="polite"></div>
+<div id="active-operation" class="notice global-operation" hidden aria-live="polite"></div>
+<div id="connection-error" class="notice error" hidden role="alert"></div>
+<section id="overview" class="section" data-page="overview">
+<div class="page-title"><div><p class="eyebrow" id="location">OCI COMPUTE CLUSTER</p><h1>Cluster overview</h1><p class="muted">Current readiness, measured performance and the next action for your HPC environment.</p></div><button class="secondary download" data-url="/api/v1/exports/support" data-name="oke-hpc-support.zip">Download support bundle ↓</button></div>
+<div id="demo-banner" class="notice" hidden>DEMO WORKSPACE · Sample inventory only. Actions do not change infrastructure or measure throughput.</div>
+<div class="metrics"><article><span>Workers ready</span><strong id="metric-nodes">—</strong><small>Across the RDMA pool</small></article><article><span>Available RDMA slots</span><strong id="metric-free">—</strong><small id="metric-total">One claim per physical NIC</small></article><article><span>Latest measured bandwidth</span><strong id="metric-bw">—</strong><small id="metric-bw-detail">Complete the guided workflow to measure</small></article><article><span>Latest measured latency</span><strong id="metric-latency">—</strong><small id="metric-latency-detail">No latency measurement recorded</small></article><article><span>Active findings</span><strong id="metric-issues">—</strong><small>Driver and fleet findings</small></article></div>
+<div id="next-action" class="next-action"></div><article id="measurement-summary" class="card evidence-card" aria-live="polite"></article>
+<div class="overview-grid"><article class="card"><div class="card-heading"><h2>Fabric status</h2><span id="driver-status" class="badge">Loading</span></div><dl id="fabric-summary" class="facts"></dl><details><summary>What this architecture provides</summary><p>Each workload has its usual OKE interface plus an IPvlan child on the RDMA PF. The physical NIC stays on the host. DRA reserves one RDMA NIC for one pod at a time.</p><p>Workload pods use their own network namespace and access the shared physical RDMA device. The Dranet infrastructure daemon is privileged. Hardware VF isolation is not provided.</p></details></article><article class="card"><div class="card-heading"><h2>Attention queue</h2><small id="observed-at">—</small></div><div id="attention" class="attention-list"></div></article></div>
+</section>
+<section id="workflow" class="section" data-page="workflow" hidden><div class="section-title"><div><p class="eyebrow">GUIDED WORKFLOW</p><h2>Setup & validation</h2><p class="muted">Configure once. Check the gaps. Measure bandwidth and latency after setup is complete.</p></div><button id="preflight" class="secondary">Review readiness</button></div><div id="preflight-result"></div><div id="setup-notice" class="notice" role="status" hidden></div><div id="setup-progress" class="setup-progress" aria-label="RDMA setup progress"></div>
+<div class="workflow">
+<details class="step" id="step-config" open><summary><span class="step-number">1</span><span><strong>Set the workload configuration</strong><small>Interface, child address range, and tools image</small></span><span id="config-state" class="badge">Required</span></summary><div class="step-body"><form id="settings-form"><div class="form-grid"><label>RDMA interface<input id="rdma-pf" required value="ens800f0np0" pattern="[A-Za-z0-9_.:-]+"><small>BM.Optimized3.36 default: ens800f0np0</small></label><label>Child IPv4 CIDR<input id="rdma-child" required value="10.208.0.0/12"><small>Separate from VCN, service, and parent RDMA ranges</small></label><label class="wide">Tools image · immutable digest<input id="rdma-image" placeholder="region.ocir.io/namespace/repo@sha256:…"><small>Build workloads/rdma-tools/Dockerfile, push to OCIR, and paste the digest.</small></label><label>Existing image pull secret<input id="rdma-secret" placeholder="Optional · secret name"><small>For a private image, provision this secret in rdma-workloads and oke-rdma-diagnostics.</small></label><label>RDMA traffic class<input id="rdma-tos" type="number" min="0" max="255" value="41"><small>Default: 41 · MTU fixed at 4220</small></label></div><div class="action-row"><button type="submit" id="save-settings">Save configuration</button><span id="settings-status" class="muted" role="status"></span></div></form><p id="settings-lock" class="muted"></p></div></details>
+<details class="step" id="step-hosts"><summary><span class="step-number">2</span><span><strong>Confirm the hosts are ready</strong><small>Shared RDMA mode, parent IP, NRI, and configuration ownership</small></span><span id="hosts-state" class="badge">Check</span></summary><div class="step-body"><p>Target scope: nodes labelled <code>oci-rdma=true</code> and <code>oke-rdma-mode=dranet</code>. Evidence is reused for 24 hours and invalidated after a reboot.</p><p>For one worker, choose <strong>Diagnose / recover this worker</strong>. The full diagnostic is preselected; review its report, then assess whether targeted recovery is applicable. Physical cable faults require investigation, not an agent restart.</p><div id="host-evidence"></div><div class="action-row"><button data-action="check_hosts">Check selected hosts</button><button id="oci-health" class="secondary">Query OCI agent health</button></div><p class="muted">Runs a fixed read-only inventory in a short-lived privileged diagnostic pod. Workers must have an unpartitioned RDMA PF with no competing device-management controller.</p><div id="oci-result"></div><div data-result="check_hosts"></div></div></details>
+<details class="step" id="step-driver"><summary><span class="step-number">3</span><span><strong>Enable Dranet</strong><small>Pinned driver, OKE profile, and DeviceClass</small></span><span id="install-state" class="badge">Waiting</span></summary><div class="step-body"><p>Install Dranet v1.5.0 with IPvlan, shared RDMA devices, and the OKE cloud profile. An installed driver is checked for readiness and configuration consistency.</p><div class="action-row"><button data-action="install_dranet">Install or verify Dranet</button><button class="secondary download" data-url="/api/v1/exports/values" data-name="dranet-values.yaml">Download full Helm values ↓</button></div><div data-result="install_dranet"></div></div></details>
+<details class="step" id="step-validate"><summary><span class="step-number">4</span><span><strong>Measure cross-node RDMA</strong><small>RDMA-CM · bandwidth and small-message latency</small></span><span id="validation-state" class="badge">Waiting</span></summary><div class="step-body"><div class="form-grid"><label>Server worker<select id="server-node"><option value="">Automatic</option></select></label><label>Client worker<select id="client-node"><option value="">Automatic</option></select></label></div><label>Performance profile<select id="performance-profile"><option value="quick">Quick pair check</option><option value="sweep">Message-size sweep · up to 4 extra minutes</option><option value="matrix">All free worker pairs · 2–8 workers, up to 2 hours</option><option value="mpi">MPI collectives · automatic 2–8 workers or selected pair</option><option value="numa">NUMA local versus remote placement</option><option value="loaded">Latency under concurrent RDMA traffic · up to 4 extra minutes</option></select></label><p id="validation-capacity" class="muted"></p><div class="action-row"><button data-action="rdma_validation">Run RDMA validation</button><button class="secondary" data-action="cleanup_validation">Clean up interrupted test</button></div><p class="muted">Pair profiles use two free physical NIC claims; automatic MPI uses up to eight free workers, and the matrix checks each ordered pair of free workers sequentially. Test pods and claims are removed afterward. Each pair check runs one 64 KiB bandwidth test and one 8-byte latency test, each with 5,000 iterations. Results include average bandwidth, latency in microseconds, and available latency percentiles. Latency is perftest’s half round-trip estimate.</p><div data-result="rdma_validation"></div><h3>Pair performance and baseline comparison</h3><p>Choose endpoints above and run explicitly to populate a direction. Untested pairs remain unmeasured. Extended profiles require idle endpoints and generate deliberate traffic.</p><div id="pair-performance"></div><div data-result="cleanup_validation"></div></div></details>
+</div><div class="workload-export"><div><strong>Ready to run your workload?</strong><p>Start from a complete ResourceClaim + Pod manifest with the current settings.</p></div><button class="secondary download" data-url="/api/v1/exports/workload" data-name="rdma-workload.yaml">Download workload YAML ↓</button></div></section>
+<section id="fleet" class="section" data-page="fleet" hidden><div id="replacement-operation" aria-live="polite"></div><div class="section-title"><div><p class="eyebrow">DAY-TO-DAY ADMINISTRATION</p><h2>Workers & scaling</h2></div><label class="search-label"><span class="sr-only">Filter workers</span><input id="node-filter" type="search" placeholder="Find a worker or shape…"></label></div><div class="local-nav"><a href="#fleet">Worker inventory</a><a href="#capacity">Plan a capacity change →</a></div><article class="card"><h3>Worker onboarding</h3><p class="muted">Provisioning → Kubernetes → Dranet device → host evidence. RDMA ready means prerequisites passed; it is separate from a measured workload.</p><div id="worker-onboarding"></div></article><div class="card table-card"><div class="table-scroll"><table><thead><tr><th>Worker</th><th>Mode / health</th><th>RDMA device</th><th>Capacity</th><th>Topology</th><th>Inspect</th></tr></thead><tbody id="nodes"></tbody></table></div></div><div class="overview-grid"><article class="card"><div class="card-heading"><h3>Claim reservations</h3><span id="claim-count" class="badge">0</span></div><p class="muted">A retained claim reserves its NIC even when no pod is running. Review ownership before deleting it.</p><div id="claims"></div></article><article class="card"><div class="card-heading"><h3>Recent warning events</h3><button id="load-events" class="quiet">Refresh events</button></div><div id="events"><p class="muted">Load recent cluster and workload warnings when you need them.</p></div></article></div><div id="capacity" class="capacity-panel"><div class="section-title"><div><p class="eyebrow">TERRAFORM-OWNED CAPACITY</p><h2>Scale workers</h2><p class="muted">Plan and review a node-count change through your existing Resource Manager stack.</p></div><button id="capacity-refresh" class="secondary">Refresh capacity</button></div>
+<div id="capacity-error" class="notice error" hidden role="alert"></div>
+<article class="card"><div class="card-heading"><h3>Stack connection</h3><span id="capacity-connection-state" class="badge">Not connected</span></div><p class="muted">Use the stack that owns this cluster and node pool. Scaling requires the optional capacity IAM policy. The connection is verified against Terraform state.</p><form id="capacity-connection-form"><label>Resource Manager stack OCID<input id="capacity-stack-id" placeholder="ocid1.ormstack.…" aria-describedby="stack-id-error" required><small id="stack-id-error" class="error" role="alert"></small></label><label><span id="capacity-confirm-label">Confirm the environment name</span><input id="capacity-connect-confirm" autocomplete="off" aria-describedby="stack-confirm-error" required><small id="stack-confirm-error" class="error" role="alert"></small></label><div class="action-row"><button id="capacity-connect" type="submit">Verify and save connection</button><span id="capacity-connect-result" role="status"></span></div></form></article>
+<div class="metrics capacity-metrics"><article><span>Current pool target</span><strong id="capacity-desired">—</strong><small>Actual OKE node-pool setting</small></article><article><span>Kubernetes Ready</span><strong id="capacity-ready">—</strong><small>Workers observed in this pool</small></article><article><span>RDMA ready</span><strong id="capacity-rdma-ready">—</strong><small>Current host evidence and published devices</small></article></div>
+<article class="card"><label>New target node count<input id="capacity-target" type="number" min="0" max="64" step="1" value="2"></label><p>Generating a plan updates the stack’s desired <code>node_count</code>; infrastructure changes only after you review and apply that plan. Discard restores the previous stack target.</p><p class="muted">Zero pauses the worker pool; workloads and in-cluster services cannot run without workers. The cluster and operator remain provisioned. Cross-node validation requires two workers. Scale-in requires released RDMA claims and an idle application pool. Keep application controllers paused until scale-in finishes. Infrastructure pods drain with their disruption budgets. Force termination must be disabled. New workers inherit bootstrap and Dranet configuration and receive automatic host readiness checks.</p><div class="action-row"><button id="capacity-readiness" class="secondary">Check capacity and scaling prerequisites</button><button id="capacity-plan">Generate scale plan</button></div><div id="capacity-readiness-result" aria-live="polite"><p class="muted">Choose a target, then check OCI capacity and scaling prerequisites before generating a plan. Scale-up refreshes the report before planning and before apply. Missing counts are not zero; unavailable reports block scale-up.</p></div><div id="capacity-operation" aria-live="polite"></div><div class="action-row"><button id="capacity-apply" hidden>Review and apply plan</button><button id="capacity-discard" class="secondary" hidden>Discard target</button><button id="capacity-resume" class="secondary" hidden>Resume recorded operation</button><button id="capacity-close" class="secondary" hidden>Close failed apply</button></div><div data-result="capacity_plan"></div><div data-result="capacity_apply"></div><div data-result="capacity_discard"></div><div data-result="capacity_resume"></div><div data-result="capacity_close"></div></article></div></section>
+<section id="activity" class="section" data-page="activity" hidden><div class="section-title"><div><p class="eyebrow">AUDIT & PERFORMANCE</p><h2>Operations</h2><p class="muted">Retained jobs, measured results, diagnostics, and explicit failures.</p></div><label><span class="sr-only">Filter operations</span><select id="job-filter"><option value="all">All operations</option><option value="rdma_validation">RDMA measurements</option><option value="capacity">Capacity operations</option><option value="FAILED">Failed operations</option><option value="node_diagnostic">Host diagnostics</option></select></label></div><div class="history-controls"><label><input id="show-history" type="checkbox"> Include earlier attempts</label><span id="history-count" class="muted"></span><button class="secondary download" data-url="/api/v1/exports/support" data-name="oke-hpc-support.zip">Download support bundle ↓</button></div><p class="muted">The default view shows the latest operation of each type. Earlier attempts remain in history and do not represent current cluster health.</p><div id="jobs-list"></div></section>
 
-    <main id="main">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">OCI Kubernetes Engine</p>
-          <h1 id="page-title">RDMA environment</h1>
-        </div>
-        <div class="status-pill" id="mode-pill">Connecting…</div>
-      </header>
 
-      <section id="login" class="login card">
-        <h2>Sign in to this operator workspace</h2>
-        <p>The deployment token is kept in browser memory only. Retrieve it on the private operator with <code>sudo cat /etc/oke-rdma-control/admin.token</code>.</p>
-        <label>Workspace token<input id="token" type="password" autocomplete="off"></label>
-        <button id="login-button" class="primary">Continue</button>
-        <p class="error" id="login-error" role="alert"></p>
-      </section>
 
-      <div id="app" hidden>
-        <section class="page active" data-page-panel="overview">
-          <div class="hero">
-            <div>
-              <p class="eyebrow">Current environment</p>
-              <h2 id="env-name">Loading…</h2>
-              <p>Resource Manager creates the platform. This Control Center queries the live nodes, configures SR-IOV safely, and validates the RDMA data path.</p>
-            </div>
-            <button class="secondary" id="refresh">Refresh</button>
-          </div>
-          <div class="metrics" id="metrics"></div>
-          <div class="grid two">
-            <article class="card">
-              <div class="card-head"><h3>Readiness</h3><button class="link-button" id="run-preflight">Run preflight</button></div>
-              <div id="preflight" class="empty">Run preflight to verify cluster, add-ons, Oracle Cloud Agent plugins, hardware consistency and VF prerequisites.</div>
-            </article>
-            <article class="card" id="platform-card">
-              <h3>Managed-node bootstrap</h3>
-              <div class="empty">Loading derived Ubuntu OKE details…</div>
-            </article>
-          </div>
-          <article class="card journey-card">
-            <h3>Guided path</h3>
-            <ol class="journey">
-              <li><span>1</span><div><strong>Infrastructure</strong><small>Resource Manager: Enhanced OKE + Compute Cluster + managed CPU RDMA nodes</small></div></li>
-              <li><span>2</span><div><strong>Query managed nodes</strong><small>Kubernetes readiness, OCI instance lifecycle, Cloud Agent RDMA plugins and SR-IOV inventory</small></div></li>
-              <li><span>3</span><div><strong>Configure SR-IOV VFs</strong><small>Blocked when PF/MTU state is inconsistent across workers</small></div></li>
-              <li><span>4</span><div><strong>Create VF network</strong><small>NVIDIA IPAM + SriovNetwork after VF reconciliation</small></div></li>
-              <li><span>5</span><div><strong>Validate RDMA</strong><small>Cross-node, VF-backed, non-host-network test pods</small></div></li>
-            </ol>
-          </article>
-        </section>
-
-        <section class="page" data-page-panel="nodes">
-          <div class="section-intro">
-            <p class="eyebrow">Read-only node diagnostics</p>
-            <h2>Query managed RDMA nodes directly</h2>
-            <p>The Control Center combines Kubernetes node state, <code>SriovNetworkNodeState</code>, OCI compute metadata and Oracle Cloud Agent plugin status. It does not SSH to workers or execute arbitrary host commands.</p>
-          </div>
-          <article class="card setup-card">
-            <div class="card-head">
-              <div><h3>Node health</h3><p class="muted">Use this before configuring VFs and after any managed-node replacement.</p></div>
-              <div class="button-row"><button class="secondary" id="download-node-report" disabled>Download JSON</button><button class="primary" id="refresh-nodes">Query nodes</button></div>
-            </div>
-            <div id="node-diagnostics" class="empty">Select Query nodes to read live Kubernetes and OCI status.</div>
-          </article>
-        </section>
-
-        <section class="page" data-page-panel="network">
-          <div class="section-intro">
-            <p class="eyebrow">Live RDMA configuration</p>
-            <h2>Discover first, then configure SR-IOV</h2>
-            <p>The quickstart will not recommend a PF when workers disagree on MTU, when the common MTU is below 4000, or when link-state data indicates a disabled interface.</p>
-          </div>
-
-          <article class="card setup-card">
-            <div class="card-head">
-              <div><h3>1. Discover RDMA hardware</h3><p class="muted">Reads <code>SriovNetworkNodeState.status.interfaces</code> from every selected RDMA worker.</p></div>
-              <button class="secondary" id="discover-hardware">Discover hardware</button>
-            </div>
-            <div id="discovery" class="empty">Run discovery to see SR-IOV-capable PFs and cross-node consistency.</div>
-          </article>
-
-          <article class="card setup-card">
-            <h3>2. Save RDMA settings</h3>
-            <p class="muted">Saving does not change nodes. The backend revalidates PF, MTU and VF capacity against live discovery before it stores the configuration.</p>
-            <form id="rdma-config-form" class="form-grid">
-              <label>RDMA physical function
-                <select id="rdma-pf" required><option value="">Discover healthy hardware first</option></select>
-                <small>Only eligible common PFs are selectable. Inconsistent or standard-MTU interfaces remain visible in discovery for diagnosis.</small>
-              </label>
-              <label>MTU
-                <input id="rdma-mtu" type="number" min="4000" max="9700" required>
-                <small>Must exactly match the consistent MTU reported by all workers for the selected PF.</small>
-              </label>
-              <label>VFs per node
-                <input id="rdma-vfs" type="number" min="1" max="16" required>
-                <small>Checked against the live minimum total VF capability.</small>
-              </label>
-              <label>Kubernetes resource name
-                <div class="input-prefix"><span>nvidia.com/</span><input id="rdma-resource" pattern="[a-z0-9_]+" required></div>
-                <small>Stable resource requested by RDMA workload pods.</small>
-              </label>
-              <label>VF IP pool
-                <input id="rdma-pool" type="text" required>
-                <small>NVIDIA IPAM IPv4 pool. Review fabric suitability and overlap before use.</small>
-              </label>
-              <label>RDMA validation image digest
-                <input id="rdma-image" type="text" placeholder="fra.ocir.io/ns/rdma-tools@sha256:…">
-                <small>Optional until validation. Live runs require an immutable digest.</small>
-              </label>
-              <div class="form-actions full"><button class="primary" type="submit" id="save-rdma-config">Save RDMA settings</button><span id="config-lock-note" class="muted"></span></div>
-            </form>
-          </article>
-
-          <div class="grid two">
-            <article class="card" id="vf-card"></article>
-            <article class="card" id="net-card"></article>
-          </div>
-        </section>
-
-        <section class="page" data-page-panel="workloads">
-          <div class="section-intro">
-            <p class="eyebrow">Workload verification</p>
-            <h2>Cross-node RDMA validation</h2>
-            <p>The validation profile checks placement, <code>net1</code>, route/neighbor state, RoCE v2 GID discovery, then runs finite <code>ib_write_bw</code>. Infrastructure success is never presented as RDMA success.</p>
-          </div>
-          <article class="card workload-card">
-            <div>
-              <h3>RDMA bandwidth validation</h3>
-              <p>One <code>nvidia.com/&lt;resource&gt;</code> VF per pod, required cross-node anti-affinity, <code>hostNetwork: false</code>, <code>privileged: false</code>.</p>
-              <small id="validation-image-state">Configure an immutable RDMA tools image in SR-IOV &amp; VFs.</small>
-            </div>
-            <button class="primary" id="run-validation">Run validation</button>
-          </article>
-          <article class="card subtle">
-            <h3>Next workload profiles</h3>
-            <p>OSU MPI latency/bandwidth and OpenFOAM can be added as reviewed profiles that reuse the verified VF resource. The API intentionally does not expose arbitrary shell execution.</p>
-          </article>
-        </section>
-
-        <section class="page" data-page-panel="jobs">
-          <div class="section-intro"><p class="eyebrow">Audit-friendly activity</p><h2>Operations and results</h2><p>Long-running work is queued in durable local state so browser refreshes do not duplicate node-changing actions.</p></div>
-          <div id="jobs-list" class="jobs"></div>
-        </section>
-
-        <section class="page" data-page-panel="security">
-          <div class="section-intro"><p class="eyebrow">Trust boundaries</p><h2>Security and access</h2></div>
-          <div class="grid two">
-            <article class="card"><h3>Operator access</h3><ul class="plain"><li>Private VM with no public IP</li><li>OCI Bastion for UI forwarding and break-glass SSH</li><li>Instance principal instead of a user OCI API key</li><li>Source-restricted NSG and host-firewall rule for the private UI</li><li>Deployment-specific workspace token for the private UI</li></ul></article>
-            <article class="card"><h3>RDMA operations</h3><ul class="plain"><li>SR-IOV/VF path only</li><li>PF/MTU discovered from live node state</li><li>Node and Cloud Agent status queried read-only through APIs</li><li>Typed approval before VF/node reconfiguration</li><li>No privileged or host-network validation pods</li><li>Immutable validation image required for live RDMA test</li></ul></article>
-          </div>
-        </section>
-      </div>
-    </main>
-  </div>
-
-  <dialog id="confirm-dialog">
-    <form method="dialog" id="confirm-form">
-      <h2 id="confirm-title">Approve change</h2>
-      <p id="confirm-copy"></p>
-      <label>Type the exact environment name<input id="confirm-input" autocomplete="off"></label>
-      <div class="dialog-actions"><button value="cancel" class="secondary">Cancel</button><button value="default" id="confirm-submit" class="danger">Approve</button></div>
-    </form>
-  </dialog>
-
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js" defer></script>
-</body>
-</html>
+<section id="maintenance" class="section" data-page="maintenance" hidden><div class="section-title"><div><p class="eyebrow">ENVIRONMENT CARE</p><h1>Maintenance</h1><p class="muted">Review the impact of cleanup and reset operations before proceeding.</p></div></div><article class="card"><p class="eyebrow">ENVIRONMENT MAINTENANCE</p><h2>Reset RDMA setup</h2><p>Uninstall Dranet, remove owned test resources, and restore the guided setup to its provisioned defaults. Review the removal plan first. Application RDMA claims block reset.</p><p class="muted">Terraform infrastructure, host drivers, namespaces, pull secrets, and audit history are retained.</p><button id="preview-reset" class="secondary">Preview RDMA reset</button><div data-result="reset_rdma"></div></article></section>
+<footer>OKE HPC Control Center · v2.8.2 <span>Dranet IPvlan · CPU RDMA</span></footer>
+</main></div>
+<dialog id="confirm-dialog"><form id="confirm-form"><p class="eyebrow">REVIEW OPERATION</p><h2 id="confirm-title"></h2><p id="confirm-copy"></p><div id="confirm-preview"></div><label for="confirm-input" id="confirm-label"></label><input id="confirm-input" autocomplete="off" required><p id="confirm-error" class="error" role="alert"></p><div class="action-row"><button type="button" id="cancel-confirm" class="secondary">Cancel</button><button type="submit">Run operation</button></div></form></dialog>
+<dialog id="node-dialog" class="node-dialog"><button id="close-node" class="close secondary" aria-label="Close node detail">Close ×</button><p class="eyebrow">WORKER DETAIL</p><h2 id="node-title"></h2><div id="node-detail"></div><label>Diagnostic profile<select id="diagnostic-profile"></select></label><p id="diagnostic-description" class="muted"></p><button id="run-diagnostic">Run fixed diagnostic</button><div data-result="node_diagnostic"></div><hr><h3>Recover RDMA initialization</h3><p>Assess an OCA startup failure or review an explicit Oracle Cloud Agent restart on this worker. Assessments collect read-only evidence even with running workloads. Restart requires workload checks and separate confirmation; verified standard CoreDNS pods stay running. Other OCA plugins briefly stop. Requires cluster-administrator access.</p><button id="assess-recovery" class="secondary">Assess recovery</button><button id="assess-agent-restart" class="secondary">Preview Oracle Cloud Agent restart</button><div data-result="recovery_restart_assess"></div><div id="recovery-detail"></div><div data-result="recovery_assess"></div><div data-result="recovery_run"></div><div data-result="recovery_finish"></div><hr><h3>Replace this worker</h3><p>For a defective managed worker. Preview the exact instance and impact first. Requires an idle worker, released claims and administrator access. OKE drains safely; forced termination is disabled.</p><button id="preview-replacement" class="secondary">Preview worker replacement</button><div id="replacement-preview"></div><div data-result="replacement_preview"></div></dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+</body></html>

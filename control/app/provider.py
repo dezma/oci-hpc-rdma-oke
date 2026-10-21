@@ -1,1266 +1,480 @@
 from __future__ import annotations
-
 import ipaddress
 import json
-import re
+import os
 from pathlib import Path
-import subprocess
 import time
-from typing import Any
+import uuid
 import yaml
+from .config import Settings, public_settings
+from .provider_base import BaseProvider, ProviderError
+from . import dranet
+from .db import list_jobs
 
-from .config import Settings
+STATE_DIR = Path(os.environ.get('HPC_CONTROL_STATE_DIR', '/var/lib/oke-rdma-control'))
 
 
-class ProviderError(RuntimeError):
-    pass
+def ready(node):
+    return any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in node.get('status', {}).get('conditions', []))
 
 
-class LiveProvider:
-    """Curated live operations only. No endpoint accepts an arbitrary shell command."""
+def attributes(device):
+    return {k: next(iter(v.values()), None) for k, v in device.get('attributes', {}).items()}
 
-    def __init__(self, settings: Settings):
-        self.s = settings
 
-    def _run(
-        self,
-        argv: list[str],
-        *,
-        stdin: str | None = None,
-        timeout: int = 90,
-        check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            argv,
-            input=stdin,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            env={
-                **__import__("os").environ,
-                "KUBECONFIG": self.s.kubeconfig,
-                "OCI_CLI_AUTH": "instance_principal",
-            },
-        )
-        if check and result.returncode:
-            msg = result.stderr.strip() or result.stdout.strip() or f"command failed: {argv[0]}"
-            raise ProviderError(msg[-4000:])
+def assess_host(facts, s):
+    if not facts:
+        return ['Host inventory unavailable. Review the diagnostic execution report before changing RDMA settings.']
+    issues = []
+    iface = next((x for x in facts.get('interfaces', []) if x['name'] == s.rdma_pf_name), {})
+    if not iface:
+        return [f'Configured PF {s.rdma_pf_name} was not found in the complete link inventory. Review interface names and drivers.']
+    if 'netns shared' not in facts.get('netns', ''): issues.append('RDMA mode must be shared. Check the worker image and bootstrap configuration before scheduling workloads.')
+    if not facts.get('nri_socket'): issues.append('CRI-O NRI socket is missing.')
+    from .link_findings import findings
+    issues.extend(f['message'] + ' ' + f['next_action'] for f in findings(facts, s.rdma_pf_name, s.rdma_mtu) if f['severity'] == 'block')
+    if iface.get('num_vfs', 0) or iface.get('vf_links', 0): issues.append('The selected PF has active VFs. Use a worker with an unpartitioned RDMA PF dedicated to this profile.')
+    if not iface.get('driver', '').startswith('mlx5'): issues.append('Selected interface is not an mlx5 PF.')
+    if not any(ipaddress.ip_interface(a).ip in ipaddress.ip_network('10.224.0.0/12') for a in iface.get('addresses', [])):
+        issues.append('OCA parent IPv4 address is absent. Do not allocate a claim until OCA configures the PF.')
+    if any(v.startswith('enabled') for v in facts.get('sriov_boot_units', {}).values()):
+        issues.append('An SR-IOV boot service owns this host. Resolve conflicting host configuration before installing Dranet.')
+    return issues
+
+
+class LiveProvider(BaseProvider):
+    def _json(self, args, *, optional=False):
+        r = self.kubectl([*args, '-o', 'json'], check=False)
+        if r.returncode:
+            # Missing optional objects are normal; RBAC, transport and other failures are not.
+            if optional and ('NotFound' in r.stderr or "doesn't have a resource type" in r.stderr): return {}
+            raise ProviderError((r.stderr or r.stdout)[-2000:])
+        return json.loads(r.stdout)
+
+    def _selected(self):
+        return [n for n in self._rdma_nodes() if n.get('metadata', {}).get('labels', {}).get('oke-rdma-mode') == 'dranet']
+
+    def _host_cache(self):
+        path = STATE_DIR / 'host-readiness.json'
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def check_hosts(self, node_names=None):
+        selected = self._selected()
+        if node_names is not None: selected = [n for n in selected if n['metadata']['name'] in node_names]
+        if not selected: raise ProviderError('No nodes labelled oci-rdma=true,oke-rdma-mode=dranet. Check the managed RDMA node pool and its initial labels.')
+        self.require_registry([self.s.workload_namespace, 'oke-rdma-diagnostics'])
+        cache = self._host_cache()
+        results = []
+        self._checking_hosts = True
+        for index, n in enumerate(selected):
+            self.report_progress("Checking hosts", index, len(selected), f"Host {index + 1} of {len(selected)}: " + n["metadata"]["name"])
+            name = n['metadata']['name']
+            if not self._host_issues(n) and 'hardware_identity' in cache.get(name, {}):
+                results.append({'node': name, **cache[name], 'reused': True})
+                continue
+            result = self.node_diagnostic(name, 'dranet-readiness', str(uuid.uuid4()))
+            entry = {'at': time.time(), 'facts': result.get('facts', {}), 'reports': result.get('reports', {}), 'findings': result.get('findings', [])}
+            entry['issues'] = assess_host(entry['facts'], self.s) if result.get('collection_status', result['status']) == 'passed' else [f['message'] + ' ' + f.get('next_action', '') for f in result.get('findings', []) if f.get('severity') == 'block'] or ['Host inventory collection failed. Review exit status, events and logs in the diagnostic report.']
+            from .hardware_identity import identity, record
+            entry['hardware_identity'] = record(STATE_DIR / 'hardware-history.json', identity(n, entry['facts'], self._node_instance_id(n), self.s.rdma_pf_name))
+            cache[name] = entry
+            results.append({'node': name, **entry})
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_DIR / 'host-readiness.tmp'
+        tmp.write_text(json.dumps(cache)); tmp.chmod(0o600)
+        os.replace(tmp, STATE_DIR / 'host-readiness.json')
+        self._checking_hosts = False
+        self.report_progress('Host checks complete', len(selected), len(selected), 'Host evidence saved')
+        return {'status': 'blocked' if any(x['issues'] for x in results) else 'passed', 'hosts': results}
+
+    def _host_issues(self, node):
+        item = self._host_cache().get(node['metadata']['name'], {})
+        if time.time() - item.get('at', 0) > 86400:
+            return ['Host evidence is missing or older than 24 hours. Run host readiness once.']
+        if item.get('facts', {}).get('boot_id') != node.get('status', {}).get('nodeInfo', {}).get('bootID'):
+            return ['Node rebooted since host readiness. Refresh its evidence.']
+        return assess_host(item.get('facts', {}), self.s)
+
+    def configuration_status(self):
+        ds = self._json(['-n', 'kube-system', 'get', 'daemonset', 'dranet'], optional=True)
+        return {'installed': bool(ds), 'hardware_fields_locked': bool(ds), 'network_fields_locked': bool(ds)}
+
+    def validate_rdma_selection(self, values):
+        child = ipaddress.ip_network(values['rdma_child_cidr'])
+        for cidr in [self.s.vcn_cidr, self.s.services_cidr, '10.224.0.0/12']:
+            if child.overlaps(ipaddress.ip_network(cidr)):
+                raise ProviderError(f'Child range overlaps {cidr}. Choose a separate range before installation.')
+        if child.num_addresses < ipaddress.ip_network(self.s.worker_subnet_cidr).num_addresses:
+            raise ProviderError('Child range is smaller than the primary VNIC subnet.')
+        return values
+
+    def rdma_discovery(self):
+        cache = self._host_cache()
+        return {'nodes': [{'name': n['metadata']['name'], **cache.get(n['metadata']['name'], {})} for n in self._selected()],
+                'configured': self.s.rdma_config(), 'source': 'Fixed host readiness inventory; no VF-count heuristic.'}
+
+    def inventory(self):
+        nodes = self._rdma_nodes()
+        slices = self._json(['get', 'resourceslices', '--field-selector=spec.driver=dra.net']).get('items', [])
+        claims = self._json(['get', 'resourceclaims', '-A']).get('items', [])
+        pods = self._json(['get', 'pods', '-A']).get('items', [])
+        ds = self._json(['-n', 'kube-system', 'get', 'daemonset', 'dranet'], optional=True)
+        dc = self._json(['get', 'deviceclass', 'dra.net'], optional=True)
+        allocated = set()
+        claim_rows = []
+        for c in claims:
+            results = c.get('status', {}).get('allocation', {}).get('devices', {}).get('results', [])
+            if not any(x.get('driver') == 'dra.net' for x in results) and not any(
+                r.get('exactly', {}).get('deviceClassName') == 'dra.net' for r in c.get('spec', {}).get('devices', {}).get('requests', [])):
+                continue
+            for x in results:
+                if x.get('driver') == 'dra.net': allocated.add((x['pool'], x['device']))
+            ns, name = c['metadata']['namespace'], c['metadata']['name']
+            consumers = [p for p in pods if p['metadata']['namespace'] == ns and any(
+                r.get('resourceClaimName') == name for r in p.get('spec', {}).get('resourceClaims', []))]
+            claim_rows.append({'namespace': ns, 'name': name, 'allocated': bool(results),
+                               'devices': results, 'reserved_for': c.get('status', {}).get('reservedFor', []),
+                               'consumers': [{'name': p['metadata']['name'], 'phase': p.get('status', {}).get('phase'),
+                                              'node': p.get('spec', {}).get('nodeName')} for p in consumers]})
+        node_rows, issues = [], []
+        cache = self._host_cache()
+        ds_ready = {p['spec'].get('nodeName') for p in pods if p['metadata'].get('labels', {}).get('app.kubernetes.io/instance') == 'dranet'
+                    and any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in p.get('status', {}).get('conditions', []))}
+        for node in nodes:
+            name = node['metadata']['name']; labels = node['metadata'].get('labels', {})
+            selected = labels.get('oke-rdma-mode') == 'dranet'
+            devices = []
+            node_issues = []
+            for sl in slices:
+                if sl['spec'].get('nodeName') != name: continue
+                for d in sl['spec'].get('devices', []):
+                    a = attributes(d)
+                    if a.get('dra.net/ifName') != self.s.rdma_pf_name: continue
+                    parent = a.get('dra.net/ipv4', '')
+                    try: parent_ok = ipaddress.ip_interface(parent).ip in ipaddress.ip_network('10.224.0.0/12')
+                    except ValueError: parent_ok = False
+                    valid = parent_ok and a.get('dra.net/rdma') is True and a.get('dra.net/mtu') == self.s.rdma_mtu and a.get('dra.net/state') == 'up'
+                    if not valid: node_issues.append('Published PF has invalid parent IP, MTU, RDMA capability or link state.')
+                    if a.get('oke.dra.net/rdmaChildIpv4Cidr') != self.s.rdma_child_cidr:
+                        node_issues.append('Published child CIDR differs from the saved configuration.')
+                    devices.append({'name': d['name'], 'pool': sl['spec']['pool']['name'], 'attributes': a,
+                                    'allocated': (sl['spec']['pool']['name'], d['name']) in allocated, 'valid': valid})
+            if selected:
+                if not ready(node): node_issues.append('Kubernetes node is not Ready.')
+                if ds and name not in ds_ready: node_issues.append('Dranet daemon is not Ready on this node.')
+                if ds and not devices: node_issues.append('No matching Dranet ResourceSlice device.')
+                conflicting = [p['metadata']['name'] for p in pods if p.get('spec', {}).get('nodeName') == name
+                               and p['metadata']['name'].startswith('sriov-network-config-daemon') and not p['metadata'].get('deletionTimestamp')]
+                if conflicting: node_issues.append('SR-IOV config daemon still targets this Dranet node.')
+            row = {'name': name, 'uid': node['metadata'].get('uid', ''), 'boot_id': node.get('status', {}).get('nodeInfo', {}).get('bootID', ''), 'dranet_ready': name in ds_ready, 'mode': labels.get('oke-rdma-mode', 'unassigned'), 'ready': ready(node),
+                   'cordoned': node.get('spec', {}).get('unschedulable', False), 'devices': devices,
+                   'shape': labels.get('node.kubernetes.io/instance-type', ''),
+                   'zone': labels.get('topology.kubernetes.io/zone', ''), 'issues': node_issues,
+                   'host_findings': cache.get(name, {}).get('findings', []), 'host_reports': cache.get(name, {}).get('reports', {}),
+                   'hardware_identity': cache.get(name, {}).get('hardware_identity', {}) if cache.get(name, {}).get('hardware_identity', {}).get('boot_id') == node.get('status', {}).get('nodeInfo', {}).get('bootID') and cache.get(name, {}).get('hardware_identity', {}).get('instance_id') == self._node_instance_id(node) else {},
+                   'host_check_at': cache.get(name, {}).get('at'), 'host_issues': self._host_issues(node) if selected else [],
+                   'instance_id': self._node_instance_id(node), 'kernel': node.get('status', {}).get('nodeInfo', {}).get('kernelVersion', '')}
+            node_rows.append(row)
+            issues.extend({'node': name, 'message': msg} for msg in node_issues)
+        args = ds.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [{}])[0].get('args', [])
+        if ds:
+            expected = ['--cloud-provider-hint=OKE', '--profile-provider=cloud', '--move-ib-interfaces=false',
+                        '--cloud-provider-options=oke.rdma-child-ipv4-cidr=' + self.s.rdma_child_cidr]
+            expected += ['--filter=' + dranet.values(self.s)['args']['filter'], '--kubelet-root-dir=/var/lib/kubelet']
+            for arg in expected:
+                if arg not in args: issues.append({'node': 'Driver', 'message': 'Configuration drift: missing ' + arg})
+            template = ds['spec']['template']['spec']
+            if template.get('nodeSelector', {}).get('oke-rdma-mode') != 'dranet':
+                issues.append({'node': 'Driver', 'message': 'Configuration drift: driver is not restricted to Dranet nodes.'})
+            if template['containers'][0].get('image') != 'registry.k8s.io/networking/dranet:' + dranet.VERSION:
+                issues.append({'node': 'Driver', 'message': 'Configuration drift: driver image differs from the pinned release.'})
+        if ds and not dc: issues.append({'node': 'Cluster', 'message': 'DeviceClass dra.net is missing.'})
+        selected_rows = [n for n in node_rows if n['mode'] == 'dranet']
+        free = sum(not d['allocated'] and d['valid'] for n in selected_rows if n['ready'] and not n['cordoned'] and not n['issues'] for d in n['devices'])
+        return {'nodes': node_rows, 'claims': claim_rows, 'issues': issues, 'driver_installed': bool(ds),
+                'driver_ready': bool(ds) and bool(dc) and bool(selected_rows) and not issues, 'device_class': bool(dc),
+                'capacity': {'total': sum(len(n['devices']) for n in selected_rows), 'free': free, 'claims': len(claim_rows)},
+                'observed_at': time.time()}
+
+    def capacity_service(self):
+        from .capacity import Capacity
+        return Capacity(self, STATE_DIR)
+
+    def reset_plan(self):
+        from .reset import plan
+        return plan(self)
+
+    def reset_rdma(self, plan_id=''):
+        from .reset import execute
+        return execute(self, plan_id, STATE_DIR)
+
+    def environment(self):
+        marker = STATE_DIR / 'rdma-reset.json'
+        reset_at = json.loads(marker.read_text()).get('reset_at', 0) if marker.exists() else 0
+        return {'reset_at': reset_at, **public_settings(self.s), **self.inventory(), 'dranet_version': dranet.VERSION,
+                'mode': self.s.mode, 'platform': {'kubernetes_version': self.s.kubernetes_version}}
+
+    def preflight(self):
+        checks = []
+        try:
+            self.validate_rdma_selection(self.s.rdma_config())
+            checks.append({'name': 'Address plan', 'status': 'pass', 'detail': 'Child range does not overlap configured VCN, service or parent ranges.'})
+        except ProviderError as e: checks.append({'name': 'Address plan', 'status': 'block', 'detail': str(e)})
+        nodes = self._selected()
+        checks.append({'name': 'Dranet target nodes', 'status': 'pass' if nodes else 'block', 'detail': f'{len(nodes)} labelled workers'})
+        api = self.kubectl(['api-resources', '--api-group=resource.k8s.io', '-o', 'name']).stdout
+        checks.append({'name': 'DRA APIs', 'status': 'pass' if all(x in api for x in ['resourceclaims', 'resourceslices', 'deviceclasses']) else 'block', 'detail': 'Requires Kubernetes 1.34+ and resource.k8s.io/v1.'})
+        for n in nodes:
+            name = n['metadata']['name']; issues = self._host_issues(n)
+            if not ready(n): issues.append('Node is not Ready.')
+            checks.append({'name': name, 'status': 'block' if issues else 'pass', 'detail': issues or 'Host readiness evidence is current for this boot.'})
+        checks.extend(self.registry_checks([self.s.workload_namespace, 'oke-rdma-diagnostics']))
+        return {'checks': checks, 'blocking': sum(x['status'] == 'block' for x in checks)}
+
+    def install_dranet(self):
+        self.report_progress('Reviewing prerequisites', 0, 3)
+        pf = self.preflight()
+        if pf['blocking']: raise ProviderError(json.dumps(pf))
+        inv = self.inventory()
+        if any('SR-IOV config daemon' in x['message'] for x in inv['issues']):
+            raise ProviderError('An SR-IOV config daemon also manages selected workers. Resolve overlapping controller ownership before installing Dranet.')
+        self.report_progress('Installing or verifying Dranet', 1, 3, 'Waiting for driver rollout; bounded to three minutes')
+        if inv['driver_installed']:
+            ds = self._json(['-n', 'kube-system', 'get', 'daemonset', 'dranet'])
+            spec = ds['spec']['template']['spec']
+            expected_filter = '--filter=' + dranet.values(self.s)['args']['filter']
+            args = spec['containers'][0].get('args', [])
+            if (any('Configuration drift' in x['message'] for x in inv['issues']) or
+                expected_filter not in args or spec.get('nodeSelector', {}).get('oke-rdma-mode') != 'dranet' or
+                spec['containers'][0]['image'] != 'registry.k8s.io/networking/dranet:' + dranet.VERSION):
+                raise ProviderError('Installed driver settings differ from the requested profile. Compare exported Helm values with the deployed configuration before planning maintenance.')
+        else:
+            if self.s.operator_kubernetes_access_mode == 'least_privilege_rbac':
+                raise ProviderError('Dranet installation creates privileged infrastructure and RBAC. A cluster administrator must run the documented Helm installation once; this restricted operator can then verify it and manage workloads.')
+            chart = Path(__file__).resolve().parents[1] / 'vendor' / 'dranet-v1.5.0.tgz'
+            if not chart.exists(): raise ProviderError('Bundled Dranet chart is missing. Rebuild the operator payload.')
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            val = STATE_DIR / 'dranet-values.yaml'; val.write_text(yaml.safe_dump(dranet.values(self.s)))
+            self._run(['helm', 'upgrade', '--install', 'dranet', str(chart), '-n', 'kube-system', '-f', str(val), '--wait', '--timeout', '3m'], timeout=210)
+        self.report_progress('Configuring DeviceClass', 2, 3)
+        ns = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': self.s.workload_namespace}}
+        self._apply_documents([ns, dranet.DEVICE_CLASS], dry_run=True)
+        self._apply_documents([ns, dranet.DEVICE_CLASS])
+        return {'status': 'passed', 'message': 'Dranet and DeviceClass are configured. Refresh inventory before validation.', 'version': dranet.VERSION}
+
+    def node_diagnostics(self):
+        items = []
+        fallback = self._node_pool_instance_map()
+        for n in self._rdma_nodes():
+            name = n['metadata']['name']; iid = self._node_instance_id(n) or fallback.get(name, '')
+            items.append({'name': name, 'instance': self._instance_details(iid), 'plugins': self._instance_agent_plugins(iid)})
+        return {'nodes': items, 'observed_at': time.time()}
+
+    def events(self):
+        nodes = {n['metadata']['name'] for n in self._rdma_nodes()}
+        items = self._json(['get', 'events', '-A', '--field-selector=type=Warning']).get('items', [])
+        relevant = [x for x in items if x.get('involvedObject', {}).get('name') in nodes or
+                    x.get('metadata', {}).get('namespace') in {self.s.workload_namespace, 'kube-system', 'nvidia-network-operator'}]
+        relevant.sort(key=lambda x: x.get('lastTimestamp') or x['metadata'].get('creationTimestamp', ''), reverse=True)
+        return {'items': [{'time': x.get('lastTimestamp'), 'namespace': x['metadata']['namespace'],
+                           'object': x.get('involvedObject', {}).get('name'), 'reason': x.get('reason'),
+                           'message': x.get('message'), 'count': x.get('count')} for x in relevant[:50]]}
+
+    def validation_startup(self, names, result=None):
+        from .startup_timing import summarize
+        deadline=time.monotonic()+180;allocated={}
+        while True:
+            pods={p['metadata']['name']:p for p in self._json(['-n',self.s.workload_namespace,'get','pods','-l','app=oke-dranet-validation']).get('items',[])}
+            claims={c['metadata']['name']:c for c in self._json(['-n',self.s.workload_namespace,'get','resourceclaims','-l','app=oke-dranet-validation']).get('items',[])}
+            for name,c in claims.items():
+                if c.get('status',{}).get('allocation'):allocated.setdefault(name,time.time())
+            rows=[summarize(pods.get(name,{'metadata':{'name':name}}),claims.get(name,{}),allocated.get(name)) for name in names]
+            if result is not None:result['startup_timing']={'status':'pending','pods':rows,'poll_interval_seconds':2}
+            if all(name in pods and ready(pods[name]) for name in names):return {'status':'passed','pods':rows,'poll_interval_seconds':2}
+            if any(p.get('status',{}).get('phase') in {'Failed','Succeeded'} for p in pods.values()) or time.monotonic()>=deadline:
+                raise ProviderError('Validation pod startup failed or exceeded three minutes. Review pod events and claim allocation.')
+            time.sleep(2)
+
+    def performance_matrix(self, names):
+        if not 2<=len(names)<=8:raise ProviderError('Matrix requires 2–8 free healthy workers. Reserve a smaller test pool before running.')
+        pairs=[(a,b) for a in names for b in names if a!=b]
+        result={'status':'passed','performance_profile':'matrix','nodes':names,'pair_results':[],'started_at':time.time()}
+        deadline=time.monotonic()+7200
+        for index,(a,b) in enumerate(pairs):
+            if time.monotonic()>deadline:
+                result.update(status='failed',error='Matrix exceeded its two-hour budget');break
+            pods=self._json(['get','pods','-A']).get('items',[])
+            busy=[p['metadata']['name'] for p in pods if p.get('spec',{}).get('nodeName') in [a,b] and p.get('status',{}).get('phase') not in {'Succeeded','Failed'} and p['metadata'].get('namespace') not in {'kube-system','cert-manager','node-feature-discovery'}]
+            if busy:
+                result.update(status='failed',error='Matrix stopped: application workloads on selected endpoints');break
+            self.report_progress('Measuring worker matrix',index,len(pairs),a+' → '+b)
+            try:sample=self.rdma_validation(a,b,'quick')
+            except Exception as exc:sample={'status':'failed','nodes':[a,b],'error':str(exc)}
+            result['pair_results'].append(sample)
+            if sample.get('status')!='passed':
+                result.update(status='failed',error='Matrix stopped after a failed pair; retained successful pairs remain individual measurements.');break
+        result['finished_at']=time.time()
         return result
 
-    def kubectl(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return self._run(["kubectl", "--kubeconfig", self.s.kubeconfig, *args], **kwargs)
-
-    def oci(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return self._run(
-            ["oci", "--auth", "instance_principal", "--region", self.s.region, *args],
-            **kwargs,
-        )
-
-    @staticmethod
-    def _resource_count(value: Any) -> int:
+    def rdma_validation(self, server_node='', client_node='', performance_profile='quick'):
+        if performance_profile not in {'quick','sweep','loaded','numa','mpi','matrix'}: raise ProviderError('Unknown performance profile')
+        self.report_progress('Selecting endpoints and checking prerequisites', 0, 5)
+        inv = self.inventory()
+        if not inv['driver_ready']: raise ProviderError('Resolve driver readiness and drift findings before validation.')
+        available = [n['name'] for n in inv['nodes'] if n['mode'] == 'dranet' and n['ready'] and not n['cordoned']
+                     and not n['issues'] and any(d['valid'] and not d['allocated'] for d in n['devices'])]
+        if bool(server_node) != bool(client_node): raise ProviderError('Select both endpoints or leave both automatic.')
+        pair = [server_node, client_node] if server_node else available[:2]
+        if len(pair) != 2 or pair[0] == pair[1] or any(n not in available for n in pair):
+            raise ProviderError('Two distinct Ready, schedulable nodes with free DRA devices are required. Existing claims reserve capacity; remove only your completed workload claims.')
+        if not self.s.rdma_tools_image: raise ProviderError('Save an immutable tools image first.')
+        for n in self._selected():
+            if n['metadata']['name'] in pair:
+                problems = self._host_issues(n)
+                if problems: raise ProviderError(n['metadata']['name'] + ': ' + ' '.join(problems))
+        participants = available[:8] if performance_profile == 'mpi' and not server_node else pair
+        if performance_profile == 'matrix':
+            return self.performance_matrix(available)
+        # Deep profiles create deliberate traffic. Require application-idle endpoints.
+        if performance_profile != 'quick':
+            pods = self._json(['get','pods','-A']).get('items', [])
+            busy = [p['metadata']['name'] for p in pods if p.get('spec',{}).get('nodeName') in participants
+                    and p.get('status',{}).get('phase') not in {'Succeeded','Failed'}
+                    and p['metadata'].get('namespace') not in {'kube-system','cert-manager','node-feature-discovery'}]
+            if busy: raise ProviderError('Deep performance tests require idle endpoints; active pods: ' + ', '.join(busy[:8]))
+        # Never delete or adopt an unrelated workload with a colliding name.
+        pod_names = ['oke-dranet-server', 'oke-dranet-client'] + ['oke-dranet-mpi-'+str(i) for i in range(2,len(participants))]
+        for name in pod_names:
+            for kind in ['pod', 'resourceclaim']:
+                if self._json(['-n', self.s.workload_namespace, 'get', kind, name], optional=True):
+                    raise ProviderError(f'{kind}/{name} already exists. Use owned validation cleanup before rerunning.')
+        docs = []
+        for pod_name, n in zip(pod_names, participants):
+            host=next(x for x in self._selected() if x['metadata']['name']==n)
+            if self._host_issues(host): raise ProviderError(n+': refresh host readiness before benchmarking')
+            workload=dranet.workload(self.s, pod_name, node=n, validation=True)
+            if performance_profile=='numa':
+                workload[1]['spec']['containers'][0]['securityContext']['capabilities']['add'] += ['SYS_NICE']
+            if performance_profile=='mpi':
+                workload[1]['spec']['containers'][0]['securityContext']['capabilities']['add'] += ['SETUID','SETGID','SYS_CHROOT','CHOWN','DAC_OVERRIDE']
+                workload[1]['spec']['activeDeadlineSeconds']=900
+            docs.extend(workload)
+        result = {"status": "failed", "nodes": pair, "stage": "Pod preparation", "performance_profile": performance_profile, "timeline": [{"stage":"pod_preparation_started","at":time.time()}]}
         try:
-            return int(str(value))
-        except (TypeError, ValueError):
-            return 0
-
-    def _rdma_nodes(self) -> list[dict[str, Any]]:
-        result = self.kubectl(["get", "nodes", "-l", "oci-rdma=true", "-o", "json"])
-        return json.loads(result.stdout).get("items", [])
-
-    def _node_states(self, *, check: bool = False) -> list[dict[str, Any]]:
-        result = self.kubectl(
-            [
-                "-n",
-                self.s.sriov_operator_namespace,
-                "get",
-                "sriovnetworknodestates.sriovnetwork.openshift.io",
-                "-o",
-                "json",
-            ],
-            check=check,
-        )
-        if result.returncode:
-            return []
-        try:
-            return json.loads(result.stdout).get("items", [])
-        except json.JSONDecodeError:
-            return []
-
-    @staticmethod
-    def _node_internal_ip(node: dict[str, Any]) -> str:
-        for address in node.get("status", {}).get("addresses", []) or []:
-            if address.get("type") == "InternalIP":
-                return str(address.get("address", ""))
-        return ""
-
-    @staticmethod
-    def _node_instance_id(node: dict[str, Any]) -> str:
-        candidates = [
-            node.get("spec", {}).get("providerID", ""),
-            node.get("metadata", {}).get("annotations", {}).get("oci.oraclecloud.com/instance-id", ""),
-            node.get("metadata", {}).get("annotations", {}).get("oci.oraclecloud.com/node.info", ""),
-        ]
-        for candidate in candidates:
-            match = re.search(r"ocid1\.instance\.[A-Za-z0-9._-]+", str(candidate))
-            if match:
-                return match.group(0)
-        return ""
-
-    @staticmethod
-    def _normalized_interfaces(status: dict[str, Any]) -> list[dict[str, Any]]:
-        interfaces: list[dict[str, Any]] = []
-        for iface in status.get("interfaces", []) or []:
-            total_vfs = LiveProvider._resource_count(iface.get("totalvfs", iface.get("totalVfs", 0)))
-            if total_vfs <= 0:
-                continue
-            driver = str(iface.get("driver", ""))
-            vendor = str(iface.get("vendor", ""))
-            admin_state = str(iface.get("linkAdminState", ""))
-            interfaces.append({
-                "name": str(iface.get("name", "")),
-                "mtu": LiveProvider._resource_count(iface.get("mtu", 0)),
-                "num_vfs": LiveProvider._resource_count(iface.get("numVfs", iface.get("numvfs", 0))),
-                "total_vfs": total_vfs,
-                "driver": driver,
-                "vendor": vendor,
-                "device_id": iface.get("deviceID", iface.get("deviceId", "")),
-                "pci_address": iface.get("pciAddress", ""),
-                "link_type": iface.get("linkType", ""),
-                "link_admin_state": admin_state,
-                "link_speed": iface.get("linkSpeed", ""),
-                "likely_rdma": driver.startswith("mlx5") or vendor.lower() == "15b3",
-            })
-        return interfaces
-
-    @staticmethod
-    def _addon_name(addon: dict[str, Any]) -> str:
-        return str(addon.get("addon-name") or addon.get("addon_name") or addon.get("name") or "")
-
-    @staticmethod
-    def _addon_state(addon: dict[str, Any]) -> str:
-        return str(
-            addon.get("lifecycle-state")
-            or addon.get("lifecycle_state")
-            or addon.get("state")
-            or "UNKNOWN"
-        )
-
-    @staticmethod
-    def _addon_version(addon: dict[str, Any]) -> str:
-        return str(
-            addon.get("current-installed-version")
-            or addon.get("current_installed_version")
-            or addon.get("version")
-            or ""
-        )
-
-    def _node_pool_instance_map(self) -> dict[str, str]:
-        """Return node name/private-IP -> instance OCID from the managed node pool.
-
-        OKE node provider IDs are the preferred source, but older/custom images
-        can expose different providerID/annotation formats. The node-pool API is
-        a safe read-only fallback and avoids requiring SSH merely to correlate a
-        Kubernetes Node with OCI Instance Agent plugin state.
-        """
-        if not self.s.node_pool_id:
-            return {}
-        result = self.oci(
-            ["ce", "node-pool", "get", "--node-pool-id", self.s.node_pool_id, "--output", "json"],
-            timeout=30,
-            check=False,
-        )
-        if result.returncode:
-            return {}
-        try:
-            nodes = json.loads(result.stdout).get("data", {}).get("nodes", []) or []
-        except json.JSONDecodeError:
-            return {}
-        mapping: dict[str, str] = {}
-        for item in nodes:
-            instance_id = str(item.get("id", ""))
-            if not instance_id:
-                continue
-            for key in (item.get("name"), item.get("private-ip"), item.get("private_ip")):
-                if key:
-                    mapping[str(key)] = instance_id
-        return mapping
-
-    def _instance_details(self, instance_id: str) -> dict[str, Any]:
-        if not instance_id:
-            return {"available": False, "error": "Kubernetes node has no OCI instance OCID in providerID"}
-        result = self.oci(
-            ["compute", "instance", "get", "--instance-id", instance_id, "--output", "json"],
-            timeout=30,
-            check=False,
-        )
-        if result.returncode:
-            return {
-                "available": False,
-                "error": (result.stderr or result.stdout).strip()[-1000:],
-            }
-        try:
-            data = json.loads(result.stdout).get("data", {})
-        except json.JSONDecodeError:
-            return {"available": False, "error": "OCI Compute returned invalid JSON"}
-        return {
-            "available": True,
-            "display_name": data.get("display-name", data.get("display_name", "")),
-            "shape": data.get("shape", ""),
-            "lifecycle_state": data.get("lifecycle-state", data.get("lifecycle_state", "")),
-            "availability_domain": data.get("availability-domain", data.get("availability_domain", "")),
-        }
-
-    def _instance_agent_plugins(self, instance_id: str) -> dict[str, Any]:
-        if not instance_id:
-            return {"available": False, "items": [], "error": "Missing OCI instance OCID"}
-        result = self.oci(
-            [
-                "instance-agent",
-                "plugin",
-                "list",
-                "--compartment-id",
-                self.s.compartment_id,
-                "--instanceagent-id",
-                instance_id,
-                "--all",
-                "--output",
-                "json",
-            ],
-            timeout=30,
-            check=False,
-        )
-        if result.returncode:
-            return {
-                "available": False,
-                "items": [],
-                "error": (result.stderr or result.stdout).strip()[-1000:],
-            }
-        try:
-            raw = json.loads(result.stdout).get("data", [])
-        except json.JSONDecodeError:
-            return {"available": False, "items": [], "error": "OCI Instance Agent returned invalid JSON"}
-        items = [{
-            "name": item.get("name", ""),
-            "status": item.get("status", "UNKNOWN"),
-            "message": item.get("message") or "",
-            "updated": item.get("time-last-updated-utc", item.get("time_last_updated_utc", "")),
-        } for item in raw]
-        return {"available": True, "items": items, "error": ""}
-
-    def configuration_status(self) -> dict[str, Any]:
-        policy = self.kubectl(
-            [
-                "-n",
-                self.s.sriov_operator_namespace,
-                "get",
-                "sriovnetworknodepolicy.sriovnetwork.openshift.io",
-                f"{self.s.environment_name}-rdma-vfs",
-                "-o",
-                "name",
-            ],
-            check=False,
-        )
-        network = self.kubectl(
-            [
-                "-n",
-                self.s.sriov_operator_namespace,
-                "get",
-                "sriovnetwork.sriovnetwork.openshift.io",
-                self.s.vf_network_name,
-                "-o",
-                "name",
-            ],
-            check=False,
-        )
-        return {
-            "policy_exists": policy.returncode == 0,
-            "network_exists": network.returncode == 0,
-            "hardware_fields_locked": policy.returncode == 0,
-            "network_fields_locked": network.returncode == 0,
-        }
-
-    def rdma_discovery(self) -> dict[str, Any]:
-        """Discover and assess SR-IOV-capable PFs from live node state.
-
-        Automatic recommendations are intentionally conservative for OCI RDMA:
-        the PF must exist on every selected worker, be Mellanox/MLX5-backed, and
-        report one consistent MTU of at least 4000. A mismatched 1500/4220 view
-        is treated as a node-health blocker, not as a reason to select a different
-        down/unused Mellanox port.
-        """
-        nodes = self._rdma_nodes()
-        node_names = {
-            str(name) for n in nodes
-            if (name := n.get("metadata", {}).get("name"))
-        }
-        states = [
-            item for item in self._node_states(check=False)
-            if item.get("metadata", {}).get("name") in node_names
-        ]
-
-        by_node: list[dict[str, Any]] = []
-        for state in states:
-            status = state.get("status", {})
-            by_node.append({
-                "name": state.get("metadata", {}).get("name", "unknown"),
-                "sync_status": status.get("syncStatus", "Unknown"),
-                "interfaces": self._normalized_interfaces(status),
-            })
-
-        common: list[dict[str, Any]] = []
-        if by_node and len(by_node) == len(node_names):
-            common_names: set[str] | None = None
-            for node in by_node:
-                names = {i["name"] for i in node["interfaces"] if i["name"]}
-                common_names = names if common_names is None else common_names & names
-            # OCI BM nodes can expose multiple MLX5 PFs. The VCN PF can also be
-            # SR-IOV-capable, so "mlx5" alone is not enough to identify the RDMA
-            # fabric. Use conservative OCI-specific evidence: the fabric PFs in
-            # the supported CPU-RDMA profiles use a consistent MTU around 4220
-            # and have the highest common VF capability on the host. Anything
-            # else remains visible but cannot be approved by the normal UI.
-            raw_matches: dict[str, list[dict[str, Any]]] = {
-                name: [next(i for i in node["interfaces"] if i["name"] == name) for node in by_node]
-                for name in sorted(common_names or [])
-            }
-            highest_common_vf_capacity = max(
-                (
-                    min(m["total_vfs"] for m in matches)
-                    for matches in raw_matches.values()
-                    if all(m["likely_rdma"] for m in matches)
-                ),
-                default=0,
-            )
-            for name, matches in raw_matches.items():
-                mtus = sorted({m["mtu"] for m in matches})
-                admin_states = sorted({m["link_admin_state"].lower() for m in matches if m["link_admin_state"]})
-                mtu_consistent = len(mtus) == 1
-                mtu = matches[0]["mtu"] if mtu_consistent else None
-                min_total_vfs = min(m["total_vfs"] for m in matches)
-                blockers: list[str] = []
-                if not all(m["likely_rdma"] for m in matches):
-                    blockers.append("The interface is not consistently reported as Mellanox/MLX5-backed.")
-                if min_total_vfs < highest_common_vf_capacity:
-                    blockers.append(
-                        f"The common VF capability ({min_total_vfs}) is below the host RDMA-class maximum "
-                        f"({highest_common_vf_capacity}); this is likely a VCN/control-plane PF rather than the OCI RDMA fabric PF."
-                    )
-                if not mtu_consistent:
-                    blockers.append(f"Workers report inconsistent MTUs: {', '.join(str(x) for x in mtus)}.")
-                elif not 4000 <= (mtu or 0) <= 5000:
-                    blockers.append(
-                        f"The common MTU is {mtu}; the supported OCI CPU-RDMA profiles expect a fabric MTU in the 4000-5000 range "
-                        "(normally 4220). Verify RDMA authentication/link state and do not select a 1500- or 9000-byte VCN PF."
-                    )
-                if any(state in {"down", "disabled"} for state in admin_states):
-                    blockers.append(f"At least one worker reports a non-active link-admin state: {', '.join(admin_states)}.")
-                common.append({
-                    "name": name,
-                    "mtu": mtu,
-                    "mtus": mtus,
-                    "mtu_consistent": mtu_consistent,
-                    "min_total_vfs": min_total_vfs,
-                    "highest_common_vf_capacity": highest_common_vf_capacity,
-                    "drivers": sorted({m["driver"] for m in matches}),
-                    "vendors": sorted({m["vendor"] for m in matches}),
-                    "link_admin_states": admin_states,
-                    "likely_rdma": all(m["likely_rdma"] for m in matches),
-                    "all_nodes": True,
-                    "eligible": not blockers,
-                    "blockers": blockers,
-                })
-            common.sort(key=lambda x: (not x["eligible"], -(x["min_total_vfs"] or 0), x["name"]))
-
-        recommended = next((c for c in common if c["eligible"]), None)
-        blockers = []
-        if len(by_node) != len(node_names):
-            blockers.append(
-                f"SriovNetworkNodeState is available for {len(by_node)}/{len(node_names)} selected RDMA workers."
-            )
-        if not recommended:
-            blockers.append(
-                "No common PF is currently safe for automatic VF configuration. Resolve node/link/MTU inconsistencies first."
-            )
-        return {
-            "nodes_expected": len(nodes),
-            "nodes_reporting_state": len(by_node),
-            "nodes": by_node,
-            "common_candidates": common,
-            "recommended": recommended,
-            "configured": self.s.rdma_config(),
-            "ready_for_vf_configuration": bool(recommended) and not blockers,
-            "blockers": blockers,
-            "note": (
-                "Read-only discovery from SriovNetworkNodeState. The quickstart refuses to recommend "
-                "a PF when workers disagree on MTU, when the MTU looks like a VCN interface (1500/9000), "
-                "or when the PF has lower VF capacity than the host's RDMA-class interfaces."
-            ),
-        }
-
-    def validate_rdma_selection(self, values: dict[str, Any]) -> dict[str, Any]:
-        discovery = self.rdma_discovery()
-        name = str(values.get("rdma_pf_name", ""))
-        selected = next((item for item in discovery.get("common_candidates", []) if item["name"] == name), None)
-        if not selected:
-            raise ProviderError(
-                f"PF {name!r} is not reported as a common SR-IOV-capable interface on every selected RDMA worker."
-            )
-        if not selected.get("eligible"):
-            raise ProviderError(
-                f"PF {name!r} is not safe for VF configuration: " + " ".join(selected.get("blockers", []))
-            )
-        requested_mtu = self._resource_count(values.get("rdma_mtu"))
-        if requested_mtu != selected.get("mtu"):
-            raise ProviderError(
-                f"Requested MTU {requested_mtu} does not match the consistent live MTU {selected.get('mtu')} for {name}."
-            )
-        requested_vfs = self._resource_count(values.get("rdma_vfs_per_node"))
-        if requested_vfs > self._resource_count(selected.get("min_total_vfs")):
-            raise ProviderError(
-                f"Requested VF count {requested_vfs} exceeds the live minimum total VF capability "
-                f"{selected.get('min_total_vfs')} for {name}."
-            )
-        return selected
-
-    def node_diagnostics(self) -> dict[str, Any]:
-        """Query managed RDMA nodes through Kubernetes and OCI read-only APIs.
-
-        This deliberately avoids SSH and arbitrary host commands. It combines
-        Kubernetes readiness, SriovNetworkNodeState inventory, OCI instance
-        lifecycle data, and Oracle Cloud Agent plugin runtime state.
-        """
-        nodes = self._rdma_nodes()
-        node_pool_instances = self._node_pool_instance_map()
-        state_map = {
-            item.get("metadata", {}).get("name"): item.get("status", {})
-            for item in self._node_states(check=False)
-            if item.get("metadata", {}).get("name")
-        }
-        required_plugins = (
-            "Compute HPC RDMA Authentication",
-            "Compute HPC RDMA Auto-Configuration",
-        )
-        details: list[dict[str, Any]] = []
-        for node in nodes:
-            name = node.get("metadata", {}).get("name", "unknown")
-            ready = any(
-                condition.get("type") == "Ready" and condition.get("status") == "True"
-                for condition in node.get("status", {}).get("conditions", [])
-            )
-            internal_ip = self._node_internal_ip(node)
-            instance_id = (
-                self._node_instance_id(node)
-                or node_pool_instances.get(name, "")
-                or node_pool_instances.get(internal_ip, "")
-            )
-            plugins = self._instance_agent_plugins(instance_id)
-            plugin_map = {item.get("name"): item for item in plugins.get("items", [])}
-            required = [{
-                "name": plugin_name,
-                "status": plugin_map.get(plugin_name, {}).get("status", "UNKNOWN"),
-                "message": plugin_map.get(plugin_name, {}).get("message", ""),
-                "updated": plugin_map.get(plugin_name, {}).get("updated", ""),
-            } for plugin_name in required_plugins]
-            state = state_map.get(name, {})
-            interfaces = self._normalized_interfaces(state)
-            issues: list[dict[str, str]] = []
-            if not ready:
-                issues.append({"severity": "block", "message": "Kubernetes node is not Ready."})
-            if not instance_id:
-                issues.append({"severity": "warn", "message": "OCI instance OCID could not be extracted from the Kubernetes node."})
-            if plugins.get("available"):
-                for plugin in required:
-                    if str(plugin["status"]).upper() != "RUNNING":
-                        issues.append({
-                            "severity": "block",
-                            "message": f"{plugin['name']} is {plugin['status']} rather than RUNNING.",
-                        })
-            else:
-                issues.append({
-                    "severity": "block",
-                    "message": (
-                        "OCI Instance Agent plugin status is unavailable, so the required RDMA authentication/configuration "
-                        "state cannot be proven: " + str(plugins.get("error", "unknown error"))
-                    ),
-                })
-            sync_status = str(state.get("syncStatus", "Missing"))
-            if sync_status != "Succeeded":
-                issues.append({
-                    "severity": "block",
-                    "message": f"SriovNetworkNodeState syncStatus is {sync_status}, not Succeeded.",
-                })
-
-            likely_interfaces = [interface for interface in interfaces if interface.get("likely_rdma")]
-            if not likely_interfaces:
-                issues.append({"severity": "block", "message": "No Mellanox/MLX5 SR-IOV-capable interface is reported by SriovNetworkNodeState."})
-            else:
-                max_vfs = max(self._resource_count(interface.get("total_vfs")) for interface in likely_interfaces)
-                rdma_class = [
-                    interface for interface in likely_interfaces
-                    if self._resource_count(interface.get("total_vfs")) == max_vfs
-                ]
-                healthy_fabric = [
-                    interface for interface in rdma_class
-                    if 4000 <= self._resource_count(interface.get("mtu")) <= 5000
-                    and str(interface.get("link_admin_state", "")).lower() not in {"down", "disabled"}
-                ]
-                if not healthy_fabric:
-                    summary = ", ".join(
-                        f"{interface.get('name')} MTU {interface.get('mtu')}"
-                        for interface in rdma_class
-                    ) or "none"
-                    issues.append({
-                        "severity": "block",
-                        "message": (
-                            "No high-capacity MLX5 PF reports a healthy OCI RDMA fabric MTU on this node "
-                            f"({summary}). Verify per-interface RDMA authentication/link state before creating VFs."
-                        ),
-                    })
-            status = "pass"
-            if any(issue["severity"] == "block" for issue in issues):
-                status = "block"
-            elif issues:
-                status = "warn"
-            node_info = node.get("status", {}).get("nodeInfo", {})
-            details.append({
-                "name": name,
-                "status": status,
-                "ready": ready,
-                "internal_ip": internal_ip,
-                "instance_id": instance_id,
-                "instance": self._instance_details(instance_id),
-                "os_image": node_info.get("osImage", ""),
-                "kernel_version": node_info.get("kernelVersion", ""),
-                "kubelet_version": node_info.get("kubeletVersion", ""),
-                "sriov_sync_status": state.get("syncStatus", "Missing"),
-                "vf_allocatable": self._resource_count(
-                    node.get("status", {}).get("allocatable", {}).get(self.s.rdma_resource_full, "0")
-                ),
-                "plugins": required,
-                "plugins_available": plugins.get("available", False),
-                "interfaces": interfaces,
-                "issues": issues,
-                "break_glass_command": (
-                    f"kubectl debug node/{name} -it --image=docker.io/library/ubuntu:24.04 "
-                    "--profile=sysadmin -- chroot /host bash"
-                ),
-            })
-
-        discovery = self.rdma_discovery()
-        overall = "pass"
-        if any(node["status"] == "block" for node in details) or not discovery.get("recommended"):
-            overall = "block"
-        elif any(node["status"] == "warn" for node in details):
-            overall = "warn"
-        return {
-            "overall": overall,
-            "queried_at": int(time.time()),
-            "nodes": details,
-            "summary": {
-                "total": len(details),
-                "ready": sum(1 for node in details if node["ready"]),
-                "plugin_healthy": sum(
-                    1 for node in details
-                    if node["plugins_available"] and all(str(p["status"]).upper() == "RUNNING" for p in node["plugins"])
-                ),
-                "recommended_pf": discovery.get("recommended"),
-                "discovery_blockers": discovery.get("blockers", []),
-            },
-            "note": (
-                "Read-only diagnostics use Kubernetes and OCI Instance Agent APIs. "
-                "The break-glass command is displayed but never executed by the web application."
-            ),
-        }
-
-    def environment(self) -> dict[str, Any]:
-        nodes = self._rdma_nodes()
-        addons_raw = self.oci(
-            ["ce", "cluster", "list-addons", "--cluster-id", self.s.cluster_id, "--all", "--output", "json"]
-        ).stdout
-        addons = json.loads(addons_raw).get("data", [])
-        return {
-            "mode": "live",
-            "environment_name": self.s.environment_name,
-            "region": self.s.region,
-            "cluster_id": self.s.cluster_id,
-            "cluster_name": self.s.cluster_name,
-            "platform": {
-                "kubernetes_version": self.s.kubernetes_version,
-                "kubernetes_minor": self.s.kubernetes_minor,
-                "ubuntu_release": self.s.ubuntu_release,
-                "oke_node_package": self.s.oke_node_package,
-                "oke_repo_url": self.s.oke_repo_url,
-            },
-            "node_count": len(nodes),
-            "nodes": [
-                {
-                    "name": n["metadata"]["name"],
-                    "ready": any(
-                        c.get("type") == "Ready" and c.get("status") == "True"
-                        for c in n.get("status", {}).get("conditions", [])
-                    ),
-                    "internal_ip": self._node_internal_ip(n),
-                    "instance_id": self._node_instance_id(n),
-                    "vf_allocatable": n.get("status", {}).get("allocatable", {}).get(
-                        self.s.rdma_resource_full, "0"
-                    ),
-                }
-                for n in nodes
-            ],
-            "addons": [
-                {
-                    "name": self._addon_name(addon),
-                    "state": self._addon_state(addon),
-                    "version": self._addon_version(addon),
-                    "error": addon.get("addon-error") or addon.get("addon_error"),
-                }
-                for addon in addons
-            ],
-            "rdma": {
-                "configured": self.s.rdma_configured,
-                "pf": self.s.rdma_pf_name,
-                "mtu": self.s.rdma_mtu,
-                "vfs_per_node": self.s.rdma_vfs_per_node,
-                "resource": self.s.rdma_resource_full,
-                "resource_name": self.s.rdma_resource_name,
-                "ip_pool": self.s.rdma_ip_pool_cidr,
-                "tools_image": self.s.rdma_tools_image,
-                "tools_image_configured": bool(self.s.rdma_tools_image),
-            },
-            "configuration_status": self.configuration_status(),
-            "vf_reconciliation": self._vf_readiness(),
-        }
-
-    def preflight(self) -> dict[str, Any]:
-        checks: list[dict[str, Any]] = []
-        env = self.environment()
-        nodes = env["nodes"]
-        checks.append({
-            "name": "Two RDMA workers",
-            "status": "pass" if len(nodes) >= 2 else "block",
-            "detail": f"Found {len(nodes)} node(s) labelled oci-rdma=true.",
-        })
-        ready = sum(1 for n in nodes if n["ready"])
-        checks.append({
-            "name": "RDMA workers Ready",
-            "status": "pass" if ready == len(nodes) and ready >= 2 else "block",
-            "detail": f"{ready}/{len(nodes)} labelled nodes are Ready.",
-        })
-
-        api = self.kubectl(["api-resources", "-o", "name"], check=False).stdout.splitlines()
-        required = {
-            "sriovnetworknodepolicies.sriovnetwork.openshift.io": "SR-IOV Node Policy CRD",
-            "sriovnetworknodestates.sriovnetwork.openshift.io": "SR-IOV Node State CRD",
-            "sriovnetworks.sriovnetwork.openshift.io": "SR-IOV Network CRD",
-            "ippools.nv-ipam.nvidia.com": "NVIDIA IPAM pool CRD",
-        }
-        for resource, label in required.items():
-            checks.append({
-                "name": label,
-                "status": "pass" if resource in api else "block",
-                "detail": resource,
-            })
-
-        addon_expectations = (
-            ("Node Feature Discovery add-on", self.s.nfd_addon_name),
-            ("Certificate Manager add-on", self.s.cert_manager_addon_name),
-            ("NVIDIA Network Operator add-on", self.s.network_operator_addon_name),
-        )
-        for label, expected_name in addon_expectations:
-            addon = next(
-                (item for item in env["addons"] if str(item.get("name", "")).lower() == expected_name.lower()),
-                None,
-            )
-            state = str((addon or {}).get("state", "UNKNOWN")).upper()
-            checks.append({
-                "name": label,
-                "status": "pass" if addon and state in {"ACTIVE", "SUCCEEDED"} else "block",
-                "detail": addon or {"expected_name": expected_name},
-            })
-
-        diagnostics = self.node_diagnostics()
-        checks.append({
-            "name": "OCI RDMA node and plugin health",
-            "status": diagnostics["overall"],
-            "detail": diagnostics["summary"],
-        })
-
-        discovery = self.rdma_discovery()
-        checks.append({
-            "name": "SR-IOV hardware discovery",
-            "status": "pass" if discovery.get("recommended") else "block",
-            "detail": {
-                "common_candidates": len(discovery["common_candidates"]),
-                "nodes_reporting_state": discovery["nodes_reporting_state"],
-                "nodes_expected": discovery["nodes_expected"],
-                "blockers": discovery.get("blockers", []),
-            },
-        })
-        saved_status = "block"
-        saved_detail: Any = "Select a healthy live PF/MTU in SR-IOV & VFs before applying a policy."
-        if self.s.rdma_configured:
-            try:
-                selected = self.validate_rdma_selection(self.s.rdma_config())
-                saved_status = "pass"
-                saved_detail = {"config": self.s.rdma_config(), "live_candidate": selected}
-            except ProviderError as exc:
-                saved_detail = str(exc)
-        checks.append({
-            "name": "RDMA VF configuration saved and still valid",
-            "status": saved_status,
-            "detail": saved_detail,
-        })
-
-        vf_readiness = env.get("vf_reconciliation", self._vf_readiness())
-        checks.append({
-            "name": "SR-IOV VF reconciliation",
-            "status": "pass" if vf_readiness.get("ready") else "warn",
-            "detail": vf_readiness,
-        })
-
-        if self.s.rdma_tools_image:
-            immutable = "@sha256:" in self.s.rdma_tools_image and len(
-                self.s.rdma_tools_image.rsplit("@sha256:", 1)[-1]
-            ) == 64
-            checks.append({
-                "name": "Immutable RDMA tools image",
-                "status": "pass" if immutable else "block",
-                "detail": self.s.rdma_tools_image,
-            })
-        else:
-            checks.append({
-                "name": "RDMA tools image",
-                "status": "warn",
-                "detail": "Not configured. VF setup can continue, but live bandwidth validation is disabled.",
-            })
-
-        return {"checks": checks, "blocking": sum(1 for c in checks if c["status"] == "block")}
-
-    def _vf_readiness(self) -> dict[str, Any]:
-        node_result = self.kubectl(["get", "nodes", "-l", "oci-rdma=true", "-o", "json"], check=False)
-        if node_result.returncode:
-            return {"ready": False, "reason": "Unable to read RDMA nodes", "nodes": []}
-        try:
-            nodes = json.loads(node_result.stdout).get("items", [])
-        except json.JSONDecodeError:
-            return {"ready": False, "reason": "Invalid node JSON returned by Kubernetes", "nodes": []}
-
-        if not self.s.rdma_configured:
-            return {
-                "ready": False,
-                "reason": "RDMA PF/MTU have not been selected in the Control Center",
-                "expected_vfs_per_node": self.s.rdma_vfs_per_node,
-                "resource": self.s.rdma_resource_full,
-                "nodes": [n.get("metadata", {}).get("name", "unknown") for n in nodes],
-            }
-
-        state_items = self._node_states(check=False)
-        if not state_items:
-            return {
-                "ready": False,
-                "reason": "SriovNetworkNodeState resources are not readable yet",
-                "expected_vfs_per_node": self.s.rdma_vfs_per_node,
-                "nodes": [n.get("metadata", {}).get("name", "unknown") for n in nodes],
-            }
-
-        states = {
-            item.get("metadata", {}).get("name"): item.get("status", {})
-            for item in state_items
-            if item.get("metadata", {}).get("name")
-        }
-        details: list[dict[str, Any]] = []
-        for node in nodes:
-            name = node.get("metadata", {}).get("name", "unknown")
-            state = states.get(name, {})
-            sync_status = state.get("syncStatus", "Missing")
-            message = state.get("lastSyncError") or state.get("error") or state.get("message") or ""
-            allocatable = self._resource_count(
-                node.get("status", {}).get("allocatable", {}).get(self.s.rdma_resource_full, "0")
-            )
-            details.append({
-                "name": name,
-                "sync_status": sync_status,
-                "vf_allocatable": allocatable,
-                "expected_vfs": self.s.rdma_vfs_per_node,
-                "ready": sync_status == "Succeeded" and allocatable >= self.s.rdma_vfs_per_node,
-                "message": str(message)[:500],
-            })
-
-        return {
-            "ready": len(details) >= 2 and all(item["ready"] for item in details),
-            "expected_vfs_per_node": self.s.rdma_vfs_per_node,
-            "resource": self.s.rdma_resource_full,
-            "nodes": details,
-        }
-
-    def _require_vf_readiness(self) -> dict[str, Any]:
-        readiness = self._vf_readiness()
-        if not readiness.get("ready"):
-            raise ProviderError(
-                "SR-IOV VF reconciliation is not complete on every RDMA node. "
-                "Wait until SriovNetworkNodeState syncStatus is Succeeded and the "
-                f"configured {self.s.rdma_resource_full} capacity is allocatable. "
-                + json.dumps(readiness)
-            )
-        return readiness
-
-    def _wait_for_network_attachment(self, timeout: int = 90) -> dict[str, Any]:
-        deadline = time.monotonic() + timeout
-        last_error = ""
-        while time.monotonic() < deadline:
-            result = self.kubectl(
-                [
-                    "-n",
-                    self.s.workload_namespace,
-                    "get",
-                    "network-attachment-definitions.k8s.cni.cncf.io",
-                    self.s.vf_network_name,
-                    "-o",
-                    "json",
-                ],
-                check=False,
-            )
-            if result.returncode == 0:
+            self.report_progress('Preparing workload pods', 1, 5, 'Waiting for two pods and NIC claims; up to three minutes')
+            self._apply_documents(docs, dry_run=True)
+            self._apply_documents(docs)
+            result['startup_timing'] = self.validation_startup(pod_names, result)
+            result['timeline'].append({'stage':'pods_and_claims_ready','at':time.time()})
+            devices = [next(n for n in inv['nodes'] if n['name'] == name)['devices'][0]['attributes']['dra.net/rdmaDevice'] for name in pair]
+            for index, test in enumerate(['bandwidth', 'latency']):
+                stage = 'RDMA-CM ' + test
+                result['stage'] = stage
+                self.report_progress(stage, 2 + index, 5,
+                                     '64 KiB / 5,000 writes' if test == 'bandwidth' else '8 bytes / 5,000 writes; half round-trip latency')
+                r = self._run(['python3', str(Path(__file__).resolve().parents[1] / 'validation' / 'test_rdma.py'),
+                               '--namespace', self.s.workload_namespace, '--interface', self.s.rdma_pf_name,
+                               '--child-cidr', self.s.rdma_child_cidr, '--tos', str(self.s.rdma_tos),
+                               '--server-device', devices[0], '--client-device', devices[1], '--test', test], timeout=180, check=False)
                 try:
-                    return json.loads(result.stdout)
+                    measurement = json.loads(r.stdout)
                 except json.JSONDecodeError:
-                    last_error = "network attachment returned invalid JSON"
-            else:
-                last_error = (result.stderr or result.stdout).strip()[-1000:]
-            time.sleep(2)
-        raise ProviderError(
-            f"Timed out waiting for NetworkAttachmentDefinition {self.s.workload_namespace}/{self.s.vf_network_name}: {last_error}"
-        )
+                    raise ProviderError((r.stderr + r.stdout)[-3500:])
+                if test == 'bandwidth':
+                    result.update(measurement)
+                else:
+                    result['latency'] = measurement
+                if r.returncode or measurement.get('status') != 'passed':
+                    result.update(status='failed', stage=stage, error=measurement.get('error', stage + ' did not pass'))
+                    break
+            if result.get('status') == 'passed' and performance_profile != 'quick':
+                self.report_progress('Extended performance profile', 3, 5, performance_profile + '; maximum four minutes')
+                result['timeline'].append({'stage':'extended_profile_started','at':time.time()})
+                if performance_profile=='mpi':
+                    members=[{'pod':pod,'node':name,'device':next(n for n in inv['nodes'] if n['name']==name)['devices'][0]['attributes']['dra.net/rdmaDevice']} for pod,name in zip(pod_names,participants)]
+                    command=['python3',str(Path(__file__).resolve().parents[1]/'validation'/'mpi_suite.py'),'--namespace',self.s.workload_namespace,'--participants',json.dumps(members),'--tos',str(self.s.rdma_tos)]
+                else:
+                    command=['python3',str(Path(__file__).resolve().parents[1]/'validation'/'performance_suite.py'),'--profile',performance_profile,'--namespace',self.s.workload_namespace,'--interface',self.s.rdma_pf_name,'--child-cidr',self.s.rdma_child_cidr,'--tos',str(self.s.rdma_tos),'--server-device',devices[0],'--client-device',devices[1]]
+                r=self._run(command,timeout=300,check=False)
+                try: result['extended'] = json.loads(r.stdout)
+                except ValueError: raise ProviderError('Extended profile did not return valid evidence: ' + r.stderr[-1000:])
+                if r.returncode or result['extended'].get('status') != 'passed':
+                    result.update(status='failed', error=result['extended'].get('error','Extended profile failed'))
+            result['nodes'] = pair
 
-    def _apply_documents(self, docs: list[dict[str, Any]], *, dry_run: bool = False) -> str:
-        text = yaml.safe_dump_all(docs, sort_keys=False)
-        args = ["apply", "-f", "-"]
-        if dry_run:
-            args.insert(1, "--dry-run=server")
-        return self.kubectl(args, stdin=text, timeout=120).stdout
+        except Exception as exc:
+            result.update(status='failed', error=str(exc)[:4000])
+            try:
+                observed = self._json(['-n', self.s.workload_namespace, 'get', 'pods', '-l', 'app=oke-dranet-validation'])
+                result['pod_status'] = [{'name': p['metadata']['name'], 'status': p.get('status', {})} for p in observed.get('items', [])]
+            except Exception as inventory_error:
+                result['inventory_error'] = str(inventory_error)[:1000]
+        finally:
+            self.report_progress('Releasing validation pods and claims', 4, 5)
+            try:
+                self._validation_cleanup = True
+                result['cleanup'] = self.cleanup_validation()
+                self._validation_cleanup = False
+            except Exception as cleanup_error:
+                result['cleanup'] = {'status': 'failed', 'error': str(cleanup_error)[:2000]}
+                result['status'] = 'failed'
+                result['message'] = 'Cleanup incomplete. Review owned validation resources before retrying.'
+        from .measurements import context
+        result['context'] = context(inv['nodes'], self.s)
+        result['timeline'].append({'stage':'cleanup_finished','at':time.time()})
+        from .performance import provenance
+        result['provenance'] = provenance(pair, inv, self._host_cache(), self.s, performance_profile)
+        result['participants'] = participants
+        return result
 
-    def _pf_selector_key(self) -> str:
-        """Accommodate SR-IOV operator API variants using pfName or pfNames."""
-        result = self.kubectl(
-            ["get", "crd", "sriovnetworknodepolicies.sriovnetwork.openshift.io", "-o", "json"],
-            check=False,
-        )
-        if result.returncode:
-            return "pfNames"
-        try:
-            crd = json.loads(result.stdout)
-            versions = crd.get("spec", {}).get("versions", [])
-            version = next((v for v in versions if v.get("served")), versions[0] if versions else {})
-            props = (
-                version.get("schema", {})
-                .get("openAPIV3Schema", {})
-                .get("properties", {})
-                .get("spec", {})
-                .get("properties", {})
-                .get("nicSelector", {})
-                .get("properties", {})
-            )
-            if "pfNames" in props:
-                return "pfNames"
-            if "pfName" in props:
-                return "pfName"
-        except (json.JSONDecodeError, IndexError):
-            pass
-        return "pfNames"
-
-    def configure_vfs(self) -> dict[str, Any]:
-        if not self.s.rdma_configured:
-            raise ProviderError("Select and save the RDMA PF and MTU in the Control Center before configuring VFs")
-
-        diagnostics = self.node_diagnostics()
-        if diagnostics.get("overall") == "block":
-            raise ProviderError(
-                "VF configuration is blocked because one or more managed RDMA nodes are unhealthy. "
-                "Open Managed nodes, resolve the reported Kubernetes/OCI plugin/interface issues, "
-                "then query the nodes again before approving the policy. "
-                + json.dumps(diagnostics.get("summary", {}))
-            )
-
-        selected = self.validate_rdma_selection(self.s.rdma_config())
-
-        selector_key = self._pf_selector_key()
-        policy = {
-            "apiVersion": "sriovnetwork.openshift.io/v1",
-            "kind": "SriovNetworkNodePolicy",
-            "metadata": {
-                "name": f"{self.s.environment_name}-rdma-vfs",
-                "namespace": self.s.sriov_operator_namespace,
-            },
-            "spec": {
-                "resourceName": self.s.rdma_resource_name,
-                "nodeSelector": {"oci-rdma": "true"},
-                "priority": 90,
-                "mtu": self.s.rdma_mtu,
-                "numVfs": self.s.rdma_vfs_per_node,
-                "nicSelector": {selector_key: [self.s.rdma_pf_name]},
-                "deviceType": "netdevice",
-                "isRdma": True,
-            },
-        }
-        dry = self._apply_documents([policy], dry_run=True)
-        applied = self._apply_documents([policy], dry_run=False)
-        return {
-            "dry_run": dry.strip(),
-            "apply": applied.strip(),
-            "selected_interface": selected,
-            "warning": "VF reconciliation can drain/reconfigure nodes. Wait for node states and allocatable VF resources before continuing.",
-        }
-
-    def configure_network(self) -> dict[str, Any]:
-        readiness = self._require_vf_readiness()
-        ipaddress.ip_network(self.s.rdma_ip_pool_cidr, strict=False)
-        ns = {
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {
-                "name": self.s.workload_namespace,
-                "labels": {"app.kubernetes.io/part-of": "oke-rdma-quickstart"},
-            },
-        }
-        pool = {
-            "apiVersion": "nv-ipam.nvidia.com/v1alpha1",
-            "kind": "IPPool",
-            "metadata": {"name": self.s.ip_pool_name, "namespace": self.s.sriov_operator_namespace},
-            "spec": {"subnet": self.s.rdma_ip_pool_cidr, "perNodeBlockSize": 8},
-        }
-        network = {
-            "apiVersion": "sriovnetwork.openshift.io/v1",
-            "kind": "SriovNetwork",
-            "metadata": {"name": self.s.vf_network_name, "namespace": self.s.sriov_operator_namespace},
-            "spec": {
-                "networkNamespace": self.s.workload_namespace,
-                "resourceName": self.s.rdma_resource_name,
-                "ipam": json.dumps({"type": "nv-ipam", "poolName": self.s.ip_pool_name}),
-            },
-        }
-        dry = self._apply_documents([ns, pool, network], dry_run=True)
-        applied = self._apply_documents([ns, pool, network])
-        nad = self._wait_for_network_attachment()
-        return {
-            "dry_run": dry.strip(),
-            "apply": applied.strip(),
-            "vf_readiness": readiness,
-            "network_attachment": {
-                "namespace": nad.get("metadata", {}).get("namespace"),
-                "name": nad.get("metadata", {}).get("name"),
-            },
-        }
-
-    def _validation_pods(self) -> list[dict[str, Any]]:
-        if not self.s.rdma_tools_image or "@sha256:" not in self.s.rdma_tools_image:
-            raise ProviderError(
-                "Configure the RDMA tools image in the Control Center as an immutable repository@sha256:digest reference"
-            )
-        docs: list[dict[str, Any]] = []
-        for role in ("server", "client"):
-            docs.append({
-                "apiVersion": "v1",
-                "kind": "Pod",
-                "metadata": {
-                    "name": f"rdma-{role}",
-                    "namespace": self.s.workload_namespace,
-                    "labels": {"app": "oke-rdma-validation", "role": role},
-                    "annotations": {
-                        "k8s.v1.cni.cncf.io/networks": json.dumps([
-                            {"name": self.s.vf_network_name, "interface": "net1"}
-                        ])
-                    },
-                },
-                "spec": {
-                    "restartPolicy": "Never",
-                    "hostNetwork": False,
-                    "hostPID": False,
-                    "hostIPC": False,
-                    "automountServiceAccountToken": False,
-                    "nodeSelector": {"oci-rdma": "true"},
-                    "affinity": {
-                        "podAntiAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": [{
-                                "labelSelector": {"matchLabels": {"app": "oke-rdma-validation"}},
-                                "topologyKey": "kubernetes.io/hostname",
-                            }]
-                        }
-                    },
-                    "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
-                    "containers": [{
-                        "name": "rdma",
-                        "image": self.s.rdma_tools_image,
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["/bin/bash", "-c"],
-                        "args": [
-                            "set -euo pipefail; command -v ib_write_bw; command -v python3; ip -br addr; rdma link; exec sleep infinity"
-                        ],
-                        "securityContext": {
-                            "privileged": False,
-                            "allowPrivilegeEscalation": False,
-                            "runAsUser": 0,
-                            "readOnlyRootFilesystem": True,
-                            "capabilities": {"drop": ["ALL"], "add": ["IPC_LOCK", "NET_RAW"]},
-                        },
-                        "resources": {
-                            "requests": {"cpu": "1", "memory": "512Mi", self.s.rdma_resource_full: "1"},
-                            "limits": {"memory": "2Gi", self.s.rdma_resource_full: "1"},
-                        },
-                        "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
-                    }],
-                    "volumes": [{"name": "tmp", "emptyDir": {}}],
-                },
-            })
-        return docs
-
-    def rdma_validation(self) -> dict[str, Any]:
-        self._require_vf_readiness()
-        self._wait_for_network_attachment(timeout=30)
-        self.kubectl(
-            [
-                "-n",
-                self.s.workload_namespace,
-                "delete",
-                "pod",
-                "rdma-server",
-                "rdma-client",
-                "--ignore-not-found=true",
-            ],
-            check=False,
-        )
-        self._apply_documents(self._validation_pods(), dry_run=True)
-        self._apply_documents(self._validation_pods())
-        self.kubectl(
-            [
-                "-n",
-                self.s.workload_namespace,
-                "wait",
-                "--for=condition=Ready",
-                "pod/rdma-server",
-                "pod/rdma-client",
-                "--timeout=300s",
-            ],
-            timeout=320,
-        )
-        result = self._run(
-            [
-                "python3",
-                str(Path(__file__).resolve().parents[1] / "validation" / "test_rdma.py"),
-                "--namespace",
-                self.s.workload_namespace,
-            ],
-            timeout=180,
-            check=False,
-        )
-        try:
-            parsed = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            parsed = {
-                "status": "failed",
-                "stdout": result.stdout[-4000:],
-                "stderr": result.stderr[-4000:],
-            }
-        if result.returncode:
-            raise ProviderError(json.dumps(parsed))
-        return parsed
-
-    def cleanup_validation(self) -> dict[str, Any]:
-        result = self.kubectl(
-            [
-                "-n",
-                self.s.workload_namespace,
-                "delete",
-                "pod",
-                "rdma-server",
-                "rdma-client",
-                "--ignore-not-found=true",
-            ],
-            check=False,
-        )
-        return {
-            "output": (result.stdout + result.stderr).strip(),
-            "note": "VF policy and SR-IOV network were intentionally left intact.",
-        }
+    def cleanup_validation(self):
+        if not getattr(self, '_validation_cleanup', False):
+            self.report_progress('Releasing validation pods and claims', 0, 1)
+        selector = 'app=oke-dranet-validation,app.kubernetes.io/part-of=oke-rdma-quickstart'
+        self.kubectl(['-n', self.s.workload_namespace, 'delete', 'pods', '-l', selector, '--ignore-not-found', '--wait=true', '--timeout=40s'], timeout=50)
+        self.kubectl(['-n', self.s.workload_namespace, 'delete', 'resourceclaims', '-l', selector, '--ignore-not-found', '--wait=true', '--timeout=40s'], timeout=50)
+        return {'status': 'passed', 'message': 'Owned validation pods and claims removed; RDMA capacity released.'}
 
 
-class DemoProvider:
-    def __init__(self, settings: Settings):
-        self.s = settings
+class DemoProvider(LiveProvider):
+    def _rdma_nodes(self):
+        return [{'metadata': {'name': f'worker-{x}', 'labels': {'oci-rdma': 'true', 'oke-rdma-mode': 'dranet'}},
+                 'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}} for x in [10, 11]]
 
-    def configuration_status(self) -> dict[str, Any]:
-        return {
-            "policy_exists": False,
-            "network_exists": False,
-            "hardware_fields_locked": False,
-            "network_fields_locked": False,
-        }
-
-    def rdma_discovery(self) -> dict[str, Any]:
-        common = {
-            "name": "ens800f0np0",
-            "mtu": 4220,
-            "mtus": [4220],
-            "mtu_consistent": True,
-            "min_total_vfs": 8,
-            "drivers": ["mlx5_core"],
-            "vendors": ["15b3"],
-            "link_admin_states": ["up"],
-            "likely_rdma": True,
-            "all_nodes": True,
-            "eligible": True,
-            "blockers": [],
-        }
-        return {
-            "nodes_expected": 2,
-            "nodes_reporting_state": 2,
-            "nodes": [
-                {
-                    "name": "rdma-node-a",
-                    "sync_status": "Succeeded",
-                    "interfaces": [{**common, "total_vfs": 8, "driver": "mlx5_core", "vendor": "15b3", "pci_address": "0000:81:00.0", "device_id": "demo", "link_type": "ETH", "link_admin_state": "up", "link_speed": "100000 Mb/s"}],
-                },
-                {
-                    "name": "rdma-node-b",
-                    "sync_status": "Succeeded",
-                    "interfaces": [{**common, "total_vfs": 8, "driver": "mlx5_core", "vendor": "15b3", "pci_address": "0000:81:00.0", "device_id": "demo", "link_type": "ETH", "link_admin_state": "up", "link_speed": "100000 Mb/s"}],
-                },
-            ],
-            "common_candidates": [common],
-            "recommended": common,
-            "configured": self.s.rdma_config(),
-            "ready_for_vf_configuration": True,
-            "blockers": [],
-            "note": "Demo inventory only; no live hardware was queried.",
-        }
-
-    def validate_rdma_selection(self, values: dict[str, Any]) -> dict[str, Any]:
-        candidate = self.rdma_discovery()["recommended"]
-        if values.get("rdma_pf_name") != candidate["name"]:
-            raise ProviderError("Demo PF selection is not available")
-        if int(values.get("rdma_mtu", 0)) != candidate["mtu"]:
-            raise ProviderError("Demo MTU does not match discovered MTU")
-        if int(values.get("rdma_vfs_per_node", 0)) > candidate["min_total_vfs"]:
-            raise ProviderError("Demo VF count exceeds capacity")
-        return candidate
-
-    def node_diagnostics(self) -> dict[str, Any]:
-        plugins = [
-            {"name": "Compute HPC RDMA Authentication", "status": "RUNNING", "message": "", "updated": "demo"},
-            {"name": "Compute HPC RDMA Auto-Configuration", "status": "RUNNING", "message": "", "updated": "demo"},
-        ]
-        interface = {
-            "name": "ens800f0np0", "mtu": 4220, "num_vfs": 0, "total_vfs": 8,
-            "driver": "mlx5_core", "vendor": "15b3", "device_id": "demo",
-            "pci_address": "0000:98:00.0", "link_type": "ETH", "link_admin_state": "up",
-            "link_speed": "100000 Mb/s", "likely_rdma": True,
-        }
+    def environment(self):
         nodes = []
-        for index, name in enumerate(("rdma-node-a", "rdma-node-b"), start=1):
-            nodes.append({
-                "name": name,
-                "status": "pass",
-                "ready": True,
-                "internal_ip": f"10.70.1.{index}",
-                "instance_id": f"ocid1.instance.demo{index}",
-                "instance": {"available": True, "shape": "BM.Optimized3.36", "lifecycle_state": "RUNNING", "display_name": name, "availability_domain": "DEMO-AD-1"},
-                "os_image": "Ubuntu 24.04",
-                "kernel_version": "demo",
-                "kubelet_version": "v1.36.4",
-                "sriov_sync_status": "Succeeded",
-                "vf_allocatable": self.s.rdma_vfs_per_node,
-                "plugins": plugins,
-                "plugins_available": True,
-                "interfaces": [interface],
-                "issues": [],
-                "break_glass_command": f"kubectl debug node/{name} -it --image=docker.io/library/ubuntu:24.04 --profile=sysadmin -- chroot /host bash",
-            })
-        return {
-            "overall": "pass",
-            "queried_at": int(time.time()),
-            "nodes": nodes,
-            "summary": {"total": 2, "ready": 2, "plugin_healthy": 2, "recommended_pf": self.rdma_discovery()["recommended"], "discovery_blockers": []},
-            "note": "Demo inventory only; no live nodes or OCI plugins were queried.",
-        }
+        for x in [10, 11]:
+            nodes.append({'name': f'worker-{x}', 'mode': 'dranet', 'ready': True, 'cordoned': False,
+                          'shape': 'BM.Optimized3.36', 'zone': 'EU-FRANKFURT-1-AD-1', 'kernel': '6.8.0-1026-oracle',
+                          'issues': [], 'host_issues': [], 'host_check_at': time.time(),
+                          'devices': [{'name': 'pci-0000-98-00-0', 'allocated': False, 'valid': True,
+                                       'attributes': {'dra.net/ifName': self.s.rdma_pf_name, 'dra.net/rdmaDevice': 'mlx5_2',
+                                                      'dra.net/ipv4': f'10.224.0.{x}/12', 'dra.net/mtu': 4220,
+                                                      'oke.dra.net/rackId': 'example-rack', 'oke.dra.net/networkBlockId': 'example-network-block'}}]})
+        return {**public_settings(self.s), 'mode': 'demo', 'nodes': nodes, 'claims': [], 'issues': [],
+                'driver_installed': True, 'driver_ready': True, 'device_class': True, 'dranet_version': dranet.VERSION,
+                'capacity': {'total': 2, 'free': 2, 'claims': 0}, 'observed_at': time.time()}
 
-    def environment(self) -> dict[str, Any]:
-        return {
-            "mode": "demo",
-            "environment_name": self.s.environment_name,
-            "region": self.s.region,
-            "cluster_id": self.s.cluster_id,
-            "cluster_name": self.s.cluster_name,
-            "platform": {
-                "kubernetes_version": self.s.kubernetes_version,
-                "kubernetes_minor": self.s.kubernetes_minor,
-                "ubuntu_release": self.s.ubuntu_release,
-                "oke_node_package": self.s.oke_node_package,
-                "oke_repo_url": self.s.oke_repo_url,
-            },
-            "node_count": 2,
-            "nodes": [
-                {"name": "rdma-node-a", "ready": True, "vf_allocatable": "2"},
-                {"name": "rdma-node-b", "ready": True, "vf_allocatable": "2"},
-            ],
-            "addons": [{
-                "name": self.s.network_operator_addon_name,
-                "state": "ACTIVE",
-                "version": "demo",
-            }],
-            "rdma": {
-                "configured": self.s.rdma_configured,
-                "pf": self.s.rdma_pf_name,
-                "mtu": self.s.rdma_mtu,
-                "vfs_per_node": self.s.rdma_vfs_per_node,
-                "resource": self.s.rdma_resource_full,
-                "resource_name": self.s.rdma_resource_name,
-                "ip_pool": self.s.rdma_ip_pool_cidr,
-                "tools_image": self.s.rdma_tools_image,
-                "tools_image_configured": bool(self.s.rdma_tools_image),
-            },
-            "configuration_status": self.configuration_status(),
-            "vf_reconciliation": {
-                "ready": self.s.rdma_configured,
-                "expected_vfs_per_node": self.s.rdma_vfs_per_node,
-                "resource": self.s.rdma_resource_full,
-                "nodes": [
-                    {"name": "rdma-node-a", "sync_status": "Succeeded", "vf_allocatable": self.s.rdma_vfs_per_node, "expected_vfs": self.s.rdma_vfs_per_node, "ready": self.s.rdma_configured, "message": "Demo only"},
-                    {"name": "rdma-node-b", "sync_status": "Succeeded", "vf_allocatable": self.s.rdma_vfs_per_node, "expected_vfs": self.s.rdma_vfs_per_node, "ready": self.s.rdma_configured, "message": "Demo only"},
-                ],
-            },
-        }
-
-    def preflight(self) -> dict[str, Any]:
-        return {
-            "blocking": 0 if self.s.rdma_configured else 1,
-            "checks": [
-                {"name": "Two RDMA workers", "status": "pass", "detail": "Demo: 2 labelled nodes"},
-                {"name": "NVIDIA Network Operator add-on", "status": "pass", "detail": "Demo only; not a live OCI measurement"},
-                {"name": "SR-IOV hardware discovery", "status": "pass", "detail": "Demo: common Mellanox PF candidate detected"},
-                {"name": "RDMA VF configuration saved", "status": "pass" if self.s.rdma_configured else "block", "detail": self.s.rdma_config()},
-                {"name": "Immutable RDMA tools image", "status": "pass" if self.s.rdma_tools_image else "warn", "detail": self.s.rdma_tools_image or "Not configured"},
-            ],
-        }
-
-    def configure_vfs(self) -> dict[str, Any]:
-        time.sleep(0.4)
-        return {"status": "simulated", "warning": "Demo only; no nodes were reconfigured."}
-
-    def configure_network(self) -> dict[str, Any]:
-        time.sleep(0.3)
-        return {"status": "simulated"}
-
-    def rdma_validation(self) -> dict[str, Any]:
-        time.sleep(0.6)
-        return {
-            "status": "simulated",
-            "cross_node": True,
-            "bandwidth_gbit_s": None,
-            "note": "Demo mode never fabricates a benchmark measurement.",
-        }
-
-    def cleanup_validation(self) -> dict[str, Any]:
-        return {"status": "simulated"}
+    def reset_plan(self):
+        return {'can_reset': True, 'plan_id': '0' * 64, 'blockers': [], 'targets': [], 'local_files': [], 'retained': ['Demo only: no infrastructure changes']}
+    def reset_rdma(self, plan_id=''):
+        return {'status': 'simulated', 'message': 'Demo reset; no cluster resources removed.'}
+    def inventory(self): return self.environment()
+    def configuration_status(self): return {'installed': False, 'hardware_fields_locked': False, 'network_fields_locked': False}
+    def preflight(self): return {'blocking': 0, 'checks': [{'name': 'Demo preview', 'status': 'pass', 'detail': 'No live infrastructure queried.'}]}
+    def check_hosts(self, node_names=None): return {'status': 'simulated', 'message': 'Demo host inventory; no privileged pod created.'}
+    def install_dranet(self): return {'status': 'simulated', 'message': 'Demo installation; no cluster changed.'}
+    def rdma_validation(self, server_node='', client_node='', performance_profile='quick'): return {'status': 'simulated', 'average_gbps': None, 'message': 'No measurement was taken.'}
+    def cleanup_validation(self): return {'status': 'simulated', 'message': 'Demo cleanup; no resources deleted.'}
+    def node_diagnostics(self): return {'nodes': [], 'message': 'Demo: OCI was not queried.'}
+    def events(self): return {'items': []}
+    def rdma_discovery(self): return {'nodes': [], 'configured': self.s.rdma_config()}
+    def node_diagnostic(self, node_name, profile_name, job_id):
+        self.validate_node_diagnostic(node_name, profile_name)
+        from .diagnostics import write_reports
+        report = {'node': node_name, 'profile': profile_name, 'status': 'simulated', 'output': 'No live host queried.'}
+        return {**report, 'reports': write_reports(job_id, report, report['output'])}
 
 
-def get_provider(settings: Settings):
-    return DemoProvider(settings) if settings.mode == "demo" else LiveProvider(settings)
+def get_provider(settings):
+    return DemoProvider(settings) if settings.mode == 'demo' else LiveProvider(settings)

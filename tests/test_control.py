@@ -1,300 +1,206 @@
-from __future__ import annotations
-
+from dataclasses import replace
 import json
-import subprocess
-
+import time
+import pytest
 from fastapi.testclient import TestClient
-
-from app.config import load_settings, save_rdma_config
-from app.jobs import validate_request
 from app.main import app
-from app.provider import DemoProvider, LiveProvider
+from app.config import Settings, load_settings
+from app.models import RdmaConfigUpdate
+from app.provider import LiveProvider, DemoProvider, ProviderError, assess_host
+from app import dranet, db
+from app.jobs import validate_request
+from app.diagnostics import sanitize_output
+
+client = TestClient(app)
+AUTH = {'Authorization': 'Bearer demo'}
+
+def facts(**overrides):
+    return {'boot_id': 'boot1', 'netns': 'netns shared copy-on-fork on', 'nri_socket': True,
+            'sriov_boot_units': {'sriov-config.service': 'disabled'},
+            'interfaces': [{'name':'ens800f0np0','mtu':4220,'carrier':'1','driver':'mlx5_core',
+                            'addresses':['10.224.0.105/12'],'num_vfs':0,'vf_links':0}], **overrides}
 
 
-def test_demo_environment_never_claims_measurement():
-    s = load_settings()
-    p = DemoProvider(s)
-    result = p.rdma_validation()
-    assert result["status"] == "simulated"
-    assert result["bandwidth_gbit_s"] is None
+def node(name='n1'):
+    return {'metadata':{'name':name,'labels':{'oci-rdma':'true','oke-rdma-mode':'dranet'}},
+            'status':{'nodeInfo':{'bootID':'boot1'},'conditions':[{'type':'Ready','status':'True'}]}}
+
+@pytest.mark.parametrize('url', ['/api/v1/environment','/api/v1/jobs','/api/v1/operations/events','/api/v1/exports/values','/api/v1/exports/snapshot'])
+def test_auth_required(url):
+    assert client.get(url).status_code == 401
+    assert client.get(url,headers=AUTH).status_code == 200
 
 
-def test_mutating_action_requires_exact_environment_name():
-    s = load_settings()
-    try:
-        validate_request(s, "configure_vfs", "wrong")
-    except ValueError as exc:
-        assert s.environment_name in str(exc)
-    else:
-        raise AssertionError("expected confirmation failure")
-    validate_request(s, "configure_vfs", s.environment_name)
+def test_security_and_token_not_stored_in_browser():
+    r=client.get('/'); assert r.status_code==200
+    assert "frame-ancestors 'none'" in r.headers['Content-Security-Policy']
+    from pathlib import Path
+    js=(Path(__file__).parents[1]/'control/web/app.js').read_text()
+    assert 'localStorage' not in js and 'sessionStorage' not in js
 
 
-def test_api_requires_token():
-    client = TestClient(app)
-    assert client.get("/health/live").status_code == 200
-    assert client.get("/api/v1/environment").status_code == 401
-    ok = client.post("/api/v1/session", headers={"Authorization": "Bearer demo"})
-    assert ok.status_code == 200
-    env = client.get("/api/v1/environment", headers={"Authorization": "Bearer demo"})
-    assert env.status_code == 200
-    assert env.json()["mode"] == "demo"
+def test_demo_measurement_never_fabricated():
+    r=DemoProvider(load_settings()).rdma_validation()
+    assert r['status']=='simulated' and r['average_gbps'] is None
+
+@pytest.mark.parametrize('action',['install_dranet','check_hosts','rdma_validation','cleanup_validation','node_diagnostic'])
+def test_mutations_confirmed(action):
+    with pytest.raises(ValueError):validate_request(Settings(),action,'wrong')
+    validate_request(Settings(),action,Settings().environment_name)
 
 
-def test_security_headers_present():
-    client = TestClient(app)
-    response = client.get("/")
-    assert response.headers["x-frame-options"] == "DENY"
-    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
-    assert "geolocation=()" in response.headers["permissions-policy"]
+def test_unsupported_actions_rejected():
+    for body in [{'action':'configure_vfs'}, {'action':'install_dranet','command':'reboot'}]:
+        assert client.post('/api/v1/jobs',headers=AUTH,json=body).status_code==422
 
 
-def test_runtime_rdma_config_is_persisted_and_reloaded():
-    before = load_settings()
-    saved = save_rdma_config({
-        "rdma_pf_name": "ens999f0np0",
-        "rdma_mtu": 4220,
-        "rdma_vfs_per_node": 3,
-        "rdma_resource_name": "oci_rdma_vf",
-        "rdma_ip_pool_cidr": "10.239.252.0/24",
-        "rdma_tools_image": "example.invalid/tools@sha256:" + "a" * 64,
-    })
-    assert saved.rdma_pf_name == "ens999f0np0"
-    assert saved.rdma_vfs_per_node == 3
-    assert load_settings().rdma_ip_pool_cidr == "10.239.252.0/24"
-    # Restore test defaults for the tests below.
-    save_rdma_config(before.rdma_config())
+def test_frozen_job_payload_and_duplicate_guard():
+    r=client.post('/api/v1/jobs',headers=AUTH,json={'action':'rdma_validation','confirmation':'oke-rdma-demo'})
+    assert r.status_code==200 and r.json()['payload']['settings']['rdma_tos']==41
+    assert client.post('/api/v1/jobs',headers=AUTH,json={'action':'preflight'}).status_code==409
+    assert client.put('/api/v1/diagnostics/image',headers=AUTH,json={'image':'r@sha256:'+'a'*64}).status_code==409
 
 
-def test_api_exposes_editable_rdma_config_and_demo_discovery():
-    client = TestClient(app)
-    headers = {"Authorization": "Bearer demo"}
-    discovery = client.get("/api/v1/rdma/discovery", headers=headers)
-    assert discovery.status_code == 200
-    assert discovery.json()["recommended"]["name"] == "ens800f0np0"
-
-    payload = {
-        "rdma_pf_name": "ens800f0np0",
-        "rdma_mtu": 4220,
-        "rdma_vfs_per_node": 2,
-        "rdma_resource_name": "oci_rdma_vf",
-        "rdma_ip_pool_cidr": "10.239.251.0/24",
-        "rdma_tools_image": "example.invalid/rdma-tools@sha256:" + "b" * 64,
-    }
-    updated = client.put("/api/v1/rdma/config", headers=headers, json=payload)
-    assert updated.status_code == 200
-    assert updated.json()["configured"] is True
-    config = client.get("/api/v1/rdma/config", headers=headers).json()
-    assert config["config"]["rdma_pf_name"] == "ens800f0np0"
+def test_failed_result_keeps_evidence():
+    j=db.enqueue('check_hosts','');db.complete(j['id'],{'status':'blocked','hosts':['evidence']})
+    out=db.get_job(j['id']);assert out['state']=='FAILED' and out['result']['hosts']==['evidence']
 
 
-def test_validation_pods_preserve_non_host_non_privileged_boundary():
-    s = load_settings()
-    docs = LiveProvider(s)._validation_pods()
-    assert len(docs) == 2
-    for pod in docs:
-        spec = pod["spec"]
-        container = spec["containers"][0]
-        security = container["securityContext"]
-        assert spec["hostNetwork"] is False
-        assert spec["hostPID"] is False
-        assert spec["hostIPC"] is False
-        assert spec["automountServiceAccountToken"] is False
-        assert security["privileged"] is False
-        assert security["allowPrivilegeEscalation"] is False
-        assert security["readOnlyRootFilesystem"] is True
-        assert security["capabilities"]["drop"] == ["ALL"]
-        assert set(security["capabilities"]["add"]) == {"IPC_LOCK", "NET_RAW"}
-        assert container["resources"]["requests"][s.rdma_resource_full] == "1"
+def test_expired_mutation_not_replayed():
+    j=db.enqueue('install_dranet','');db.claim_next(lease_seconds=-1)
+    assert db.claim_next() is None
+    assert db.get_job(j['id'])['state']=='FAILED'
+    assert db.get_job(j['id'])['finished_at']
 
 
-def test_vf_readiness_requires_operator_success_and_expected_capacity():
-    class FakeLiveProvider(LiveProvider):
-        def kubectl(self, args, **kwargs):
-            if args[:4] == ["get", "nodes", "-l", "oci-rdma=true"]:
-                data = {
-                    "items": [
-                        {"metadata": {"name": "node-a"}, "status": {"allocatable": {self.s.rdma_resource_full: "2"}}},
-                        {"metadata": {"name": "node-b"}, "status": {"allocatable": {self.s.rdma_resource_full: "2"}}},
-                    ]
-                }
-                return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
-            if "sriovnetworknodestates.sriovnetwork.openshift.io" in args:
-                data = {
-                    "items": [
-                        {"metadata": {"name": "node-a"}, "status": {"syncStatus": "Succeeded"}},
-                        {"metadata": {"name": "node-b"}, "status": {"syncStatus": "Succeeded"}},
-                    ]
-                }
-                return subprocess.CompletedProcess(args, 0, json.dumps(data), "")
-            raise AssertionError(args)
+def test_config_image_independent_of_discovery():
+    r=client.put('/api/v1/diagnostics/image',headers=AUTH,json={'image':'repo/image@sha256:'+'a'*64})
+    assert r.status_code==200
+    assert load_settings().rdma_tools_image.endswith('a'*64)
 
-    readiness = FakeLiveProvider(load_settings())._vf_readiness()
-    assert readiness["ready"] is True
-    assert all(node["ready"] for node in readiness["nodes"])
+@pytest.mark.parametrize('cidr',['10.224.0.0/12','127.0.0.0/8','169.254.0.0/16','224.0.0.0/4','10.208.0.1/12','::/64'])
+def test_invalid_child_ranges(cidr):
+    with pytest.raises(ValueError):RdmaConfigUpdate(rdma_pf_name='ens800f0np0',rdma_child_cidr=cidr)
 
 
-def test_hardware_discovery_finds_common_mellanox_pf():
-    class FakeDiscoveryProvider(LiveProvider):
-        def _rdma_nodes(self):
-            return [{"metadata": {"name": "node-a"}}, {"metadata": {"name": "node-b"}}]
-
-        def _node_states(self, *, check=False):
-            def state(name, pci):
-                return {
-                    "metadata": {"name": name},
-                    "status": {
-                        "syncStatus": "Succeeded",
-                        "interfaces": [{
-                            "name": "ens800f0np0",
-                            "driver": "mlx5_core",
-                            "vendor": "15b3",
-                            "deviceID": "demo",
-                            "pciAddress": pci,
-                            "mtu": 4220,
-                            "totalvfs": 8,
-                            "linkType": "ETH",
-                        }],
-                    },
-                }
-            return [state("node-a", "0000:81:00.0"), state("node-b", "0000:81:00.0")]
-
-    result = FakeDiscoveryProvider(load_settings()).rdma_discovery()
-    assert result["recommended"]["name"] == "ens800f0np0"
-    assert result["recommended"]["mtu"] == 4220
-    assert result["recommended"]["likely_rdma"] is True
+def test_vcn_and_service_overlap_blocked():
+    p=LiveProvider(Settings())
+    for cidr in ['10.70.0.0/16','10.96.0.0/16','10.208.0.0/28']:
+        with pytest.raises(ProviderError):p.validate_rdma_selection({'rdma_child_cidr':cidr})
 
 
-def test_configure_network_blocks_before_vfs_are_reconciled(monkeypatch):
-    import pytest
-    from app.provider import ProviderError
+def test_healthy_pf_does_not_depend_on_sriov_capacity():
+    assert assess_host(facts(),Settings())==[]
+    f=facts();f['interfaces'].append({'name':'ens300f0np0','mtu':9000,'total_vfs':54})
+    assert assess_host(f,Settings())==[]
 
-    p = LiveProvider(load_settings())
-    monkeypatch.setattr(
-        p,
-        "_vf_readiness",
-        lambda: {
-            "ready": False,
-            "resource": p.s.rdma_resource_full,
-            "expected_vfs_per_node": p.s.rdma_vfs_per_node,
-            "nodes": [],
-        },
-    )
-    with pytest.raises(ProviderError, match="VF reconciliation is not complete"):
-        p.configure_network()
+@pytest.mark.parametrize('change',[{'netns':'netns exclusive'},{'nri_socket':False},{'sriov_boot_units':{'x':'enabled'}}])
+def test_host_preconditions(change):
+    assert assess_host(facts(**change),Settings())
 
 
-def test_node_diagnostics_api_is_authenticated_and_available_in_demo():
-    client = TestClient(app)
-    unauthorized = client.get("/api/v1/nodes")
-    assert unauthorized.status_code == 401
-    response = client.get("/api/v1/nodes", headers={"Authorization": "Bearer demo"})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["overall"] == "pass"
-    assert len(body["nodes"]) == 2
-    assert body["nodes"][0]["plugins"][0]["status"] == "RUNNING"
+def test_active_vfs_and_missing_oca_ip_blocked():
+    f=facts();f['interfaces'][0]['num_vfs']=2
+    assert any('active VFs' in i for i in assess_host(f,Settings()))
+    f=facts();f['interfaces'][0]['addresses']=[]
+    assert any('OCA' in i for i in assess_host(f,Settings()))
 
 
-def test_hardware_discovery_rejects_mtu_mismatch():
-    from app.provider import LiveProvider, ProviderError
-    import pytest
-
-    class FakeProvider(LiveProvider):
-        def _rdma_nodes(self):
-            return [{"metadata": {"name": "node-a"}}, {"metadata": {"name": "node-b"}}]
-
-        def _node_states(self, *, check=False):
-            return [
-                {"metadata": {"name": "node-a"}, "status": {"syncStatus": "Succeeded", "interfaces": [{"name": "ens800f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 4220, "totalvfs": 8}]}},
-                {"metadata": {"name": "node-b"}, "status": {"syncStatus": "Succeeded", "interfaces": [{"name": "ens800f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 1500, "totalvfs": 8}]}},
-            ]
-
-    provider = FakeProvider(load_settings())
-    result = provider.rdma_discovery()
-    candidate = result["common_candidates"][0]
-    assert candidate["eligible"] is False
-    assert candidate["mtu_consistent"] is False
-    assert result["recommended"] is None
-    with pytest.raises(ProviderError, match="not safe for VF configuration"):
-        provider.validate_rdma_selection({"rdma_pf_name": "ens800f0np0", "rdma_mtu": 4220, "rdma_vfs_per_node": 2})
+def test_boot_evidence_invalidated(monkeypatch):
+    p=LiveProvider(Settings());monkeypatch.setattr(p,'_host_cache',lambda:{'n1':{'at':time.time(),'facts':facts()}})
+    assert not p._host_issues(node())
+    n=node();n['status']['nodeInfo']['bootID']='boot2'
+    assert 'rebooted' in p._host_issues(n)[0]
 
 
-def test_addon_lifecycle_field_parsing_uses_oci_wire_names():
-    from app.provider import LiveProvider
-    assert LiveProvider._addon_state({"lifecycle-state": "ACTIVE"}) == "ACTIVE"
-    assert LiveProvider._addon_version({"current-installed-version": "v25.10.0-1"}) == "v25.10.0-1"
+def test_host_readiness_reuses_existing_evidence(monkeypatch):
+    p=LiveProvider(Settings());monkeypatch.setattr(p,'_selected',lambda:[node()]);monkeypatch.setattr(p,'_host_cache',lambda:{'n1':{'at':time.time(),'facts':facts(),'issues':[],'hardware_identity':{}}})
+    monkeypatch.setattr(p,'node_diagnostic',lambda *a:pytest.fail('Repeated a current host experiment'))
+    assert p.check_hosts()['hosts'][0]['reused']
 
 
-def test_hardware_discovery_does_not_recommend_vcn_pf_when_rdma_pf_is_unhealthy():
-    class FakeProvider(LiveProvider):
-        def _rdma_nodes(self):
-            return [{"metadata": {"name": "node-a"}}, {"metadata": {"name": "node-b"}}]
-
-        def _node_states(self, *, check=False):
-            return [
-                {
-                    "metadata": {"name": "node-a"},
-                    "status": {
-                        "syncStatus": "Succeeded",
-                        "interfaces": [
-                            {"name": "ens300f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 9000, "totalvfs": 54},
-                            {"name": "ens800f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 4220, "totalvfs": 127},
-                            {"name": "ens800f1np1", "driver": "mlx5_core", "vendor": "15b3", "mtu": 1500, "totalvfs": 127},
-                        ],
-                    },
-                },
-                {
-                    "metadata": {"name": "node-b"},
-                    "status": {
-                        "syncStatus": "Succeeded",
-                        "interfaces": [
-                            {"name": "ens300f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 9000, "totalvfs": 54},
-                            {"name": "ens800f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 1500, "totalvfs": 127},
-                            {"name": "ens800f1np1", "driver": "mlx5_core", "vendor": "15b3", "mtu": 1500, "totalvfs": 127},
-                        ],
-                    },
-                },
-            ]
-
-    result = FakeProvider(load_settings()).rdma_discovery()
-    assert result["recommended"] is None
-    by_name = {item["name"]: item for item in result["common_candidates"]}
-    assert by_name["ens300f0np0"]["eligible"] is False
-    assert any("VCN/control-plane PF" in reason for reason in by_name["ens300f0np0"]["blockers"])
-    assert by_name["ens800f0np0"]["eligible"] is False
-    assert by_name["ens800f1np1"]["eligible"] is False
+def test_complete_dra_workload_boundaries():
+    s=replace(Settings(),rdma_tools_image='repo@sha256:'+'a'*64,rdma_image_pull_secret='ocir')
+    claim,pod=dranet.workload(s,'sample',node='worker-10',validation=True)
+    assert claim['apiVersion']=='resource.k8s.io/v1'
+    assert claim['spec']['devices']['requests'][0]['exactly']['deviceClassName']=='dra.net'
+    assert 'nodeName' not in pod['spec']
+    assert all(pod['spec'][x] is False for x in ['hostNetwork','hostPID','hostIPC','automountServiceAccountToken'])
+    c=pod['spec']['containers'][0]
+    assert not c['securityContext']['privileged'] and c['securityContext']['capabilities']=={'drop':['ALL'],'add':['IPC_LOCK']}
+    assert c['resources']['claims']==[{'name':'rdma'}]
+    assert pod['spec']['imagePullSecrets']==[{'name':'ocir'}]
+    assert 'volumes' not in pod['spec']
 
 
-def test_hardware_discovery_prefers_healthy_high_capacity_4220_pf():
-    class FakeProvider(LiveProvider):
-        def _rdma_nodes(self):
-            return [{"metadata": {"name": "node-a"}}, {"metadata": {"name": "node-b"}}]
-
-        def _node_states(self, *, check=False):
-            interfaces = [
-                {"name": "ens300f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 9000, "totalvfs": 54},
-                {"name": "ens800f0np0", "driver": "mlx5_core", "vendor": "15b3", "mtu": 4220, "totalvfs": 127},
-                {"name": "ens800f1np1", "driver": "mlx5_core", "vendor": "15b3", "mtu": 1500, "totalvfs": 127},
-            ]
-            return [
-                {"metadata": {"name": "node-a"}, "status": {"syncStatus": "Succeeded", "interfaces": interfaces}},
-                {"metadata": {"name": "node-b"}, "status": {"syncStatus": "Succeeded", "interfaces": interfaces}},
-            ]
-
-    result = FakeProvider(load_settings()).rdma_discovery()
-    assert result["recommended"]["name"] == "ens800f0np0"
-    assert result["recommended"]["mtu"] == 4220
+def test_cleanup_only_owned_pods_then_claims(monkeypatch):
+    p=LiveProvider(Settings());calls=[]
+    monkeypatch.setattr(p,'kubectl',lambda args,**kw:calls.append(args))
+    p.cleanup_validation()
+    assert calls[0][3]=='pods' and calls[1][3]=='resourceclaims'
+    assert all('app=oke-dranet-validation,app.kubernetes.io/part-of=oke-rdma-quickstart' in c for c in calls)
 
 
-def test_configure_vfs_blocks_when_node_diagnostics_are_blocking(monkeypatch):
-    import pytest
-    from app.provider import ProviderError
+def test_report_path_and_redaction():
+    text,truncated=sanitize_output('password=abc\nAuthorization: Bearer xyz\n'+'x'*1000,max_bytes=200)
+    assert 'abc' not in text and 'xyz' not in text and truncated
+    from app.diagnostics import report_path
+    with pytest.raises(ValueError):report_path('../config','json')
 
-    provider = LiveProvider(load_settings())
-    monkeypatch.setattr(provider, "node_diagnostics", lambda: {
-        "overall": "block",
-        "summary": {"discovery_blockers": ["MTU mismatch"]},
-    })
-    with pytest.raises(ProviderError, match="managed RDMA nodes are unhealthy"):
-        provider.configure_vfs()
+
+def test_diagnostic_api_rejects_browser_shell():
+    assert client.post('/api/v1/diagnostics/runs',headers=AUTH,json={'node_name':'n1','profile':'dranet-readiness','command':'cat /etc/shadow'}).status_code==422
+
+
+def test_perftest_parser_accepts_actual_success_and_rejects_missing_measurement():
+    import importlib.util
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('validator',Path(__file__).parents[1]/'control/validation/test_rdma.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    assert m.parse_bandwidth(' 65536 5000 80.00 79.50 0.151634\n')['average_gbps']==79.50
+    with pytest.raises(ValueError):m.parse_bandwidth('Waiting for client')
+
+
+def test_settings_locked_only_for_driver_topology(monkeypatch):
+    import app.main as main
+    p=DemoProvider(load_settings())
+    monkeypatch.setattr(p,'configuration_status',lambda:{'installed':True})
+    monkeypatch.setattr(main,'get_provider',lambda s:p)
+    body=load_settings().rdma_config()
+    body['rdma_tools_image']='new@sha256:'+'b'*64
+    assert client.put('/api/v1/rdma/config',headers=AUTH,json=body).status_code==200
+    body['rdma_child_cidr']='10.192.0.0/12'
+    assert client.put('/api/v1/rdma/config',headers=AUTH,json=body).status_code==409
+
+
+def test_full_yaml_exports():
+    import yaml
+    for kind in ['values','workload']:
+        r=client.get('/api/v1/exports/'+kind,headers=AUTH)
+        assert r.status_code==200
+        docs=list(yaml.safe_load_all(r.text))
+        if kind=='workload':assert [d['kind'] for d in docs]==['Namespace','DeviceClass','ResourceClaim','Pod']
+        else:assert docs[0]['args']['cloudProviderHint']=='OKE'
+
+
+def test_progress_survives_listing_and_does_not_fake_completion():
+    j=db.enqueue('rdma_validation','');db.claim_next()
+    db.progress(j['id'],'RDMA-CM latency',3,5,'8 bytes / 5,000 writes')
+    observed=db.list_jobs()[0]
+    assert observed['state']=='RUNNING' and observed['progress']['completed']==3
+    assert observed['progress']['stage']=='RDMA-CM latency'
+    db.complete(j['id'],{'status':'failed','error':'measurement failed'})
+    assert db.get_job(j['id'])['state']=='FAILED'
+    with pytest.raises(ValueError):db.progress(j['id'],'invalid',6,5)
+
+
+def test_latency_parser_requires_microseconds_and_actual_measurement():
+    import importlib.util
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('lat_validator',Path(__file__).parents[1]/'control/validation/test_rdma.py')
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    header='#bytes #iterations t_min[usec] t_max[usec] t_typical[usec] t_avg[usec] t_stdev[usec] 99% percentile[usec] 99.9% percentile[usec]'
+    actual=header+'\n8 5000 1.2 8.9 1.6 1.72 0.12 2.5 5.1\n'
+    assert m.parse_latency(actual)['median_us']==1.6
+    assert m.parse_latency(actual)['p999_us']==5.1
+    for invalid in [actual.replace('[usec]','[nsec]'),actual.replace('1.72','0'),actual.replace('8 5000','64 5000'),'Waiting for client']:
+        with pytest.raises(ValueError):m.parse_latency(invalid)

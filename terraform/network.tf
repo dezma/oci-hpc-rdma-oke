@@ -8,10 +8,10 @@ data "oci_core_services" "oracle_services" {
 
 resource "oci_core_vcn" "this" {
   compartment_id = var.compartment_ocid
-  cidr_blocks     = [var.vcn_cidr]
-  display_name    = "${var.name_prefix}-vcn"
-  dns_label       = "okerdma"
-  freeform_tags   = local.tags
+  cidr_blocks    = [var.vcn_cidr]
+  display_name   = "${var.name_prefix}-vcn"
+  dns_label      = "okerdma"
+  freeform_tags  = local.tags
 }
 
 resource "oci_core_nat_gateway" "this" {

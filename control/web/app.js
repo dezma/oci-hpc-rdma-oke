@@ -1,429 +1,281 @@
 'use strict';
-
-let token = '';
-let env = null;
-let discovery = null;
-let nodeReport = null;
-let pendingAction = null;
-const $ = (selector) => document.querySelector(selector);
-const $$ = (selector) => [...document.querySelectorAll(selector)];
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>'"]/g, char => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
-  }[char]));
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+// Keep destructive maintenance last, including when new sections are appended.
+function arrangeWorkspace(){
+  const nav=$('.sidebar nav'),main=$('main'),maintenance=$('#maintenance');
+  if(nav){const link=nav.querySelector('a[href="#maintenance"]');if(link)nav.append(link);
+    [...nav.querySelectorAll('a')].forEach((link,index)=>{const number=link.querySelector('span');if(number)number.textContent=String(index+1).padStart(2,'0');});}
+  if(main&&maintenance){const footer=main.querySelector('footer');main.append(maintenance);if(footer)main.append(footer);}
 }
-
-function toast(message) {
-  const element = $('#toast');
-  element.textContent = message;
-  element.classList.add('show');
-  setTimeout(() => element.classList.remove('show'), 3500);
+arrangeWorkspace();
+const pages={overview:'Overview',workflow:'Setup & validation',fleet:'Workers & scaling',activity:'Operations',maintenance:'Maintenance'};
+function routeWorkspace(){
+  const id=location.hash.slice(1)||'overview';
+  const target=document.getElementById(id), page=target?.closest('[data-page]')||$('#overview');
+  $$('[data-page]').forEach(el=>el.hidden=el!==page);
+  $$('.sidebar nav a').forEach(link=>{const active=link.hash==='#'+page.id;link.classList.toggle('active',active);if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
+  $('#page-name').textContent=(pages[page.id]||'Overview')+' / ';
+  document.title=(pages[page.id]||'Overview')+' · OKE HPC';
+  if(target?.tagName==='DETAILS')target.open=true;
+  document.documentElement.scrollTop=0;
+  if(target&&target!==page)target.scrollIntoView?.({block:'start'});
 }
-
-async function api(path, options = {}) {
-  const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(path, {...options, headers});
-  let payload = {};
-  try { payload = await response.json(); } catch { /* response has no JSON body */ }
-  if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
-  return payload;
+window.addEventListener('hashchange',routeWorkspace);
+routeWorkspace();
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const title = {replacement_preview:'Worker replacement preview',replacement_run:'Replace selected worker',replacement_resume:'Resume replacement verification',replacement_close:'Close replacement for review',recovery_restart_assess:'Review Oracle Cloud Agent restart',recovery_assess:'RDMA recovery assessment',recovery_run:'Restart Oracle Cloud Agent and verify RDMA',recovery_finish:'Finish recorded recovery',preflight:'Readiness review',check_hosts:'Host readiness',install_dranet:'Dranet installation',rdma_validation:'Cross-node RDMA measurement',cleanup_validation:'Validation cleanup',reset_rdma:'Reset RDMA setup',node_diagnostic:'Host diagnostic',capacity_plan:'Capacity plan',capacity_apply:'Apply reviewed capacity plan',capacity_discard:'Discard capacity target',capacity_resume:'Resume capacity operation',capacity_close:'Acknowledge failed capacity apply'};
+let token = '', env = null, jobs = [], catalog = null, pending = null, inspectedNode = '', pollTimer = null, busy = false, firstLoad = true, lastResetAt = 0, capacity = null, capacityUpdatedAt = 0, capacityCheck = null, connectionDirty = false;
+const time = t => t ? new Date(t*1000).toLocaleString() : 'Not collected';
+const badge = (label, style='') => `<span class="badge ${esc(style)}">${esc(label)}</span>`;
+function toast(message) { $('#toast').textContent=message; $('#toast').hidden=false; clearTimeout(toast.timer); toast.timer=setTimeout(()=>$('#toast').hidden=true,6000); }
+const requestsInFlight=new Map();
+let submitting=false, refreshFlight=null, capacityFlight=null, jobsEpoch=0;
+function enforceRequestLocks(){for(const button of requestsInFlight.keys())button.disabled=true;}
+function renderRequests(){const items=[...requestsInFlight.values()];$('#request-status').hidden=!items.length;$('#request-status').textContent=items.map(r=>r.label+(Date.now()-r.started>8000?' Still waiting for the server…':'')).join(' · ');enforceRequestLocks();}
+async function withFeedback(button,label,task){
+  if(requestsInFlight.has(button))return;
+  const original=button.textContent;requestsInFlight.set(button,{label,started:Date.now()});button.textContent=label;button.setAttribute('aria-busy','true');renderRequests();
+  const timer=setInterval(renderRequests,1000);
+  try{return await task();}finally{clearInterval(timer);requestsInFlight.delete(button);button.textContent=original;button.removeAttribute('aria-busy');button.disabled=false;if(env)updateDisabled();renderRequests();}
 }
-
-function setPage(page) {
-  $$('.nav').forEach(button => button.classList.toggle('active', button.dataset.page === page));
-  $$('.page').forEach(panel => panel.classList.toggle('active', panel.dataset.pagePanel === page));
-  const titles = {
-    overview: 'RDMA environment',
-    nodes: 'Managed-node diagnostics',
-    network: 'SR-IOV & VFs',
-    workloads: 'RDMA workloads',
-    jobs: 'Activity',
-    security: 'Security & access',
-  };
-  $('#page-title').textContent = titles[page] || 'OKE RDMA';
-  if (page === 'jobs') refreshJobs();
+async function api(path, options={}) {
+  const response=await fetch(path,{...options,headers:{'Authorization':`Bearer ${token}`,'Content-Type':'application/json',...options.headers}});
+  let data; try { data=await response.json(); } catch { throw new Error(`Request failed (${response.status})`); }
+  if(!response.ok){const d=data.detail||{};const error=new Error(typeof d==='string'?d:[d.message,...(d.fields||[]).map(f=>f.message),d.next_action].filter(Boolean).join(' ')||'The request could not be completed.');error.detail=d;throw error;}
+  return data;
 }
-
-function metric(label, value, note = '') {
-  return `<article class="metric"><small>${escapeHtml(label)}</small><strong>${escapeHtml(String(value))}</strong>${note ? `<small>${escapeHtml(note)}</small>` : ''}</article>`;
+function lock(){ token=''; clearTimeout(pollTimer); $('#app').hidden=true; $('#login').hidden=false; $('#token').focus(); }
+function fillSettings(){const c=env.rdma; $('#rdma-pf').value=c.rdma_pf_name;$('#rdma-child').value=c.rdma_child_cidr;$('#rdma-image').value=c.rdma_tools_image;$('#rdma-secret').value=c.rdma_image_pull_secret;$('#rdma-tos').value=c.rdma_tos;}
+function renderEnvironment(){
+  if((env.reset_at||0)>lastResetAt){firstLoad=true;lastResetAt=env.reset_at;}
+  $('#env-name').textContent=env.environment_name;$('#location').textContent=`${env.region} / ${env.cluster_name}`;
+  $('#mode').textContent=env.mode==='demo'?'DEMO':'PRIVATE · LIVE';$('#demo-banner').hidden=env.mode!=='demo';
+  $('#access-note').textContent=`SSH · ${env.bastion_ssh_ttl_seconds/3600}h / forwarding · ${env.bastion_port_forwarding_ttl_seconds/3600}h`;
+  const selected=env.nodes.filter(n=>n.mode==='dranet');
+  $('#metric-nodes').textContent=`${env.nodes.filter(n=>n.ready).length} / ${env.nodes.length}`;
+  $('#metric-free').textContent=env.driver_installed?env.capacity.free:'—';$('#metric-total').textContent=env.driver_installed?`${env.capacity.total} physical NIC slots · ${env.capacity.claims} claims`:'Available after Dranet setup';
+  $('#metric-issues').textContent=env.issues.length;$('#observed-at').textContent=`Updated ${new Date(env.observed_at*1000).toLocaleTimeString()}`;
+  $('#driver-status').outerHTML=`<span id="driver-status" class="badge ${!env.nodes.length?'':env.driver_ready?'good':env.driver_installed?'warn':''}">${!env.nodes.length?'Waiting for workers':env.driver_ready?'Ready':env.driver_installed?'Needs attention':'Setup pending'}</span>`;
+  $('#fabric-summary').innerHTML=`<dt>Attachment</dt><dd>IPvlan · workload network namespace</dd><dt>Driver</dt><dd>Dranet ${esc(env.dranet_version)}</dd><dt>Physical interface</dt><dd>${esc(env.rdma.rdma_pf_name)} · MTU ${esc(env.rdma.rdma_mtu)}</dd><dt>Child address range</dt><dd>${esc(env.rdma.rdma_child_cidr)}</dd><dt>RDMA mode</dt><dd>Shared physical device</dd><dt>Target scope</dt><dd>${selected.length} Dranet workers / ${env.nodes.length} RDMA workers</dd>`;
+  $('#attention').innerHTML=!env.nodes.length&&!env.issues.length?'<div class="notice"><strong>No RDMA workers discovered.</strong><p>Check worker capacity before setup or validation. An empty pool has no current RDMA readiness evidence.</p></div>':env.issues.length?env.issues.slice(0,6).map(i=>`<div class="attention-item"><strong>${esc(i.node)}</strong>${esc(i.message)}</div>`).join(''):`<div class="healthy"><strong>Driver inventory has no active findings.</strong><p>Host evidence and workload performance are tracked separately below.</p></div>`;
+  const hasImage=Boolean(env.rdma.rdma_tools_image), hostsOK=selected.length>0&&selected.every(n=>!n.host_issues.length);
+  const hasMeasurement=Boolean(env.measurement_status?.validation_current);
+  let next=!env.nodes.length?['Add worker capacity','No RDMA workers are currently discovered. Check the pool status and scale up in Workers & scaling.','capacity']:!hasImage?['Save your tools image','Use an immutable image digest for host inventory and validation.','step-config']:!hostsOK?['Confirm host readiness','Check only the missing or stale evidence before deploying.','step-hosts']:!env.driver_ready?['Enable the RDMA driver','Install or verify Dranet and review any inventory findings.','step-driver']:!hasMeasurement?['Measure bandwidth and latency','Run a current pair test. Older results stay available in Operations.','step-validate']:['Current pair validation is complete','This measurement covers the tested pair. Review worker readiness before the next workload.','fleet'];
+  $('#next-action').innerHTML=`<div><strong>${esc(next[0])}</strong><p>${esc(next[1])}</p></div><a href="#${next[2]}" class="jump">${hasMeasurement?'View capacity':'Continue workflow'} →</a>`;
+  $('#config-state').textContent=hasImage?'Saved':'Not started';$('#config-state').className=`badge ${hasImage?'good':''}`;
+  $('#hosts-state').textContent=hostsOK?'Current':selected.some(n=>n.host_check_at&&n.host_issues.length)?'Refresh or review':hasImage?'Ready to check':'Waiting for configuration';$('#hosts-state').className=`badge ${hostsOK?'good':''}`;
+  $('#install-state').textContent=!env.nodes.length?'Waiting for workers':env.driver_ready?'Ready':'Review';$('#install-state').className=`badge ${!env.nodes.length?'':env.driver_ready?'good':env.driver_installed?'warn':''}`;
+  $('#validation-state').className=`badge ${hasMeasurement?'good':''}`;
+  $('#validation-state').textContent=hasMeasurement?'Measured':env.nodes.length<2?'Requires two workers':env.driver_ready&&hostsOK?'Ready to test':'Waiting for setup';
+  $('#host-evidence').innerHTML=selected.length?selected.map(n=>`<div class="attention-item"><strong>${esc(n.name)} ${badge(n.host_issues.length?(n.host_check_at?'Refresh or review':'Not checked'):'Current',n.host_issues.length?(n.host_check_at?'warn':''):'good')}</strong><small>Collected ${esc(time(n.host_check_at))}</small>${n.host_issues.map(x=>`<p>${esc(x)}</p>`).join('')}${(n.host_findings||[]).filter(f=>f.evidence).map(f=>`<details><summary>${esc(f.code||'Evidence')}</summary><pre>${esc(f.evidence)}</pre></details>`).join('')}${reportLinks(n.host_reports||{})}<button class="secondary inspect-node" data-node="${esc(n.name)}" data-profile="full-rdma-support-bundle">Diagnose / recover this worker</button></div>`).join(''):'<p class="muted">No Dranet workers are discovered. Review worker capacity and labels before host checks.</p>';
+  $('#rdma-pf').disabled=env.driver_installed;$('#rdma-child').disabled=env.driver_installed;
+  $('#settings-lock').textContent=env.driver_installed?'Interface and child range are locked while the driver is installed. The tools image, pull secret and test traffic class remain editable.':'';
+  for(const id of ['server-node','client-node']){const select=$('#'+id), old=select.value; select.innerHTML='<option value="">Automatic · choose a free worker</option>'+selected.map(n=>`<option value="${esc(n.name)}">${esc(n.name)}${n.devices.length&&n.devices.every(d=>d.allocated)?' · allocated':!n.devices.length?' · device not published':''}</option>`).join('');select.value=[...select.options].some(o=>o.value===old)?old:'';}
+  $('#validation-capacity').textContent=!env.driver_ready||!hostsOK?'Complete configuration, host readiness, and Dranet setup before running validation.':`${env.capacity.free} free slots. ${env.capacity.free<2?'Two free workers are required. Review claim reservations and worker readiness below.':'The test will choose distinct nodes and release its claims afterward.'}`;
+  $('#claim-count').textContent=env.claims.length;
+  $('#claims').innerHTML=env.claims.length?env.claims.map(c=>`<article><strong>${esc(c.namespace)}/${esc(c.name)}</strong> ${badge(c.allocated?'Reserved':'Pending',c.allocated?'warn':'')}<small>${c.consumers.length?c.consumers.map(p=>`${esc(p.name)} · ${esc(p.phase)} · ${esc(p.node)}`).join('<br>'):'No direct pod reference found; check reservedFor before cleanup.'}</small><details><summary>Allocation details</summary><pre>${esc(JSON.stringify(c,null,2))}</pre></details></article>`).join(''):'<p class="empty">No Dranet claims currently reserve capacity.</p>';
+  renderSetup();
+  renderNodes();renderOnboarding();renderMeasurement();renderRecovery();
+  if(firstLoad){fillSettings();const target=$('#'+next[2]);if(target?.tagName==='DETAILS')target.open=true;firstLoad=false;}
+  updateDisabled();
 }
-
-function ubuntuLabel(value) {
-  if (value === 'ubuntu-noble') return 'Ubuntu 24.04 Noble';
-  if (value === 'ubuntu-jammy') return 'Ubuntu 22.04 Jammy';
-  return value || 'Unknown';
+function renderNodes(){renderPerformance();const filter=$('#node-filter').value.toLowerCase();const nodes=env.nodes.filter(n=>(n.name+' '+n.shape+' '+n.mode).toLowerCase().includes(filter));$('#nodes').innerHTML=nodes.map(n=>{const d=n.devices[0],a=d?.attributes||{};return `<tr><td><strong>${esc(n.name)}</strong><small>${esc(n.shape||'Shape not published')}</small></td><td>${badge(n.ready?(n.cordoned?'Cordoned':'Ready'):'Not Ready',n.ready&&!n.cordoned?'good':'warn')}<small>${esc(n.mode)}</small></td><td><code>${esc(a['dra.net/rdmaDevice']||'—')}</code><small>${esc(a['dra.net/ipv4']||(env.driver_installed?'No Dranet device':'Awaiting setup'))}</small></td><td>${d?badge(d.allocated?'Reserved':'Free',d.allocated?'warn':'good'):'—'}</td><td>${esc(n.zone||'—')}<small>Rack ${esc((a['oke.dra.net/rackId']||'not published').slice(0,12))}</small></td><td><button class="quiet inspect-node" data-node="${esc(n.name)}">Details →</button></td></tr>`;}).join('')||'<tr><td colspan="6">No matching workers.</td></tr>';}
+const stateLabel = state => ({QUEUED:'Queued',RUNNING:'Running',SUCCEEDED:'Completed',FAILED:'Failed'})[state]||state;
+function duration(j){const seconds=Math.max(0,Math.floor((j.finished_at||Date.now()/1000)-(j.started_at||j.requested_at)));return seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m ${seconds%60}s`;}
+function operationProgress(j){
+  const active=['QUEUED','RUNNING'].includes(j.state), p=j.progress;
+  if(!active&&j.result?.replacement)return `<p class="operation-status">${esc(j.result.replacement.phase==='COMPLETE'?'Replacement verified':j.result.replacement.phase==='CLOSED'?'Closed for manual review':'Check finished; replacement still needs attention')} · ${esc(time(j.finished_at))}</p>`;
+  if(!active)return `${j.state==='SUCCEEDED'?'<progress class="completed-progress" max="1" value="1" aria-label="Operation completed"></progress>':''}<p class="operation-status">${esc(stateLabel(j.state))} · ${esc(time(j.finished_at))} · elapsed ${esc(duration(j))}</p>`;
+  const label=j.state==='QUEUED'?'Waiting for worker':p?.stage||'Starting operation';
+  return `<div class="operation-progress" role="status"><strong>${esc(label)}</strong><small>${esc(p?.detail||'Results will appear here. You can keep browsing.')} · elapsed ${esc(duration(j))}</small><progress aria-label="Completed operation phases" ${p?`max="${esc(p.total)}" value="${esc(p.completed)}"`:''}></progress>${p?`<small>${esc(p.completed)} of ${esc(p.total)} phases complete · current phase running</small>`:''}<span class="running-indicator">${esc(stateLabel(j.state))}</span></div>`;
 }
+function renderJob(j){const r=j.result||{}, hasBW=Number.isFinite(r.average_gbps), lat=r.latency?.status==='passed'?r.latency:null;let body='';
+if(j.action==='rdma_validation'&&hasBW)body=`<div class="measurement-grid"><div class="measurement"><strong>${Number(r.average_gbps).toFixed(2)}</strong><span>Gbit/s average bandwidth</span></div>${lat?`<div class="measurement"><strong>${Number(lat.average_us).toFixed(2)}</strong><span>µs average latency</span></div>`:`<p class="muted">${r.latency?'Latency measurement failed; bandwidth remains available.':'Bandwidth-only result · latency was not recorded. Run RDMA validation to measure both.'}</p>`}</div><p class="muted">${esc((r.nodes||[]).join(' → '))} · bandwidth ${esc(r.message_bytes)} bytes / ${esc(r.iterations)} writes</p>${lat?`<p>Latency · 8 bytes / 5,000 writes · median ${Number(lat.median_us).toFixed(2)} µs${lat.p99_us!==undefined?' · p99 '+Number(lat.p99_us).toFixed(2)+' µs':''}</p><p class="muted">Half round-trip estimate reported by perftest.</p>`:''}`;
+if(r.extended)body+=`<h4>${esc(r.extended.profile)} · ${esc(r.extended.status)}</h4>${r.extended.profile==='sweep'?`<table><thead><tr><th>Bytes</th><th>Test</th><th>Result</th></tr></thead><tbody>${(r.extended.samples||[]).map(s=>`<tr><td>${esc(s.message_bytes)}</td><td>${esc(s.test)}</td><td>${esc(s.average_gbps??s.average_us)} ${s.test==='bandwidth'?'Gbit/s':'µs'}</td></tr>`).join('')}</tbody></table>`:`<p>${esc(r.extended.interpretation||r.extended.error||'Extended profile evidence incomplete')}</p>${r.extended.latency_change_percent==null?'':`<p>Mean latency change: ${Number(r.extended.latency_change_percent).toFixed(1)}%</p>`}`}`;
+if(r.pair_results)body+=`<h4>Worker matrix · ${r.pair_results.length} pairs completed</h4><table><tr><th>Direction</th><th>Status</th><th>Gbit/s</th><th>Mean µs</th></tr>${r.pair_results.map(p=>`<tr><td>${esc((p.nodes||[]).join(' → '))}</td><td>${esc(p.status)}</td><td>${esc(p.average_gbps??'Unknown')}</td><td>${esc(p.latency?.average_us??'Unknown')}</td></tr>`).join('')}</table>`;
+if(r.startup_timing)body+=`<h4>Claim-to-container startup</h4>${r.startup_timing.pods.map(p=>`<p>${esc(p.pod)}</p><table><tr><th>Stage</th><th>Seconds</th></tr>${Object.entries(p.seconds).map(([k,v])=>`<tr><td>${esc(k.replaceAll('_',' '))}</td><td>${v==null?'Unknown':Number(v).toFixed(3)}</td></tr>`).join('')}</table><p class="muted">${esc(p.note)}</p>`).join('')}`;
+if(r.extended?.profile==='mpi')body+=`<p>${esc(r.extended.ranks)} ranks · ${esc(r.extended.transport||'Transport not established')}</p><table><tr><th>Collective</th><th>Bytes per peer/rank</th><th>Mean / p99 µs</th></tr>${(r.extended.samples||[]).map(s=>`<tr><td>${esc(s.operation)}</td><td>${esc(s.bytes_per_peer_or_rank)}</td><td>${esc(s.mean_us)} / ${esc(s.p99_us)}</td></tr>`).join('')}</table><p>${esc(r.extended.note||'')}</p>`;
+if(r.extended?.profile==='numa')body+=`<table><tr><th>Placement</th><th>Test</th><th>Result</th></tr>${(r.extended.samples||[]).map(s=>`<tr><td>${esc(s.placement)}</td><td>${esc(s.test)}</td><td>${esc(s.average_gbps??s.average_us)} ${s.test==='bandwidth'?'Gbit/s':'µs'}</td></tr>`).join('')}</table><details><summary>Actual CPU and memory bindings</summary><pre>${esc(JSON.stringify(r.extended.samples?.map(s=>({placement:s.placement,affinity:s.affinity})),null,2))}</pre></details>`;
+if(r.extended?.profile==='loaded')body+=`<table><tr><th>Latency statistic</th><th>Idle µs</th><th>Loaded µs</th></tr>${['average_us','median_us','p99_us','p999_us','stdev_us','max_us'].map(k=>`<tr><td>${esc(k)}</td><td>${esc(r.extended.idle_latency?.[k]??'Not reported')}</td><td>${esc(r.extended.loaded_latency?.[k]??'Not reported')}</td></tr>`).join('')}</table>`;
+if(r.timeline)body+=`<details><summary>Observed validation timeline</summary>${r.timeline.map(e=>`<p>${esc(e.stage)} · ${esc(time(e.at))}</p>`).join('')}</details>`;
+if(r.collection_status)body+=`<p>Diagnostic collection: ${esc(r.collection_status==='passed'?'completed':'failed')} · Health: ${esc(r.health_status||'not established')}</p>${(r.findings||[]).map(f=>`<p class="${f.severity==='block'?'error':'muted'}">${esc(f.message)}</p>${f.evidence?`<pre>${esc(f.evidence)}</pre>`:""}${f.next_action?`<p><strong>Next step:</strong> ${esc(f.next_action)}</p>`:""}`).join('')}`;
+if(r.message)body+=`<p class="result-summary">${esc(r.message)}</p>`;else if(r.status&&!hasBW)body+=`<p class="result-summary">Result: ${esc(r.status)}</p>`;
+if(j.error||r.error)body+=`<p class="error">${esc(j.error||r.error)}</p>`;
+if(r.reports)body+=reportLinks(r.reports);if(r.hosts)body+=r.hosts.map(h=>`<p>${esc(h.node)} · ${h.issues.length?esc(h.issues.join(' ')):'Host checks passed'}</p>${reportLinks(h.reports)}`).join('');
+return `<article class="job" data-job-id="${esc(j.id)}"><div class="job-head"><div><strong>${esc(title[j.action]||j.action)}</strong><small>${esc(time(j.requested_at))}${j.payload?.node_name?' · '+esc(j.payload.node_name):''}</small></div>${badge(j.result?.replacement?(j.result.replacement.phase==='COMPLETE'?'Verified':j.result.replacement.phase==='CLOSED'?'Closed':'Pending review'):stateLabel(j.state),j.result?.replacement&&j.result.replacement.phase!=='COMPLETE'?'warn':j.state)}</div>${operationProgress(j)}${body}${j.result?`<details><summary>Evidence and output</summary><pre>${esc(JSON.stringify(j.result,null,2))}</pre></details>`:''}</article>`;}
 
-function renderPlatform(platform) {
-  $('#platform-card').innerHTML = `
-    <h3>Managed-node bootstrap</h3>
-    <dl class="summary">
-      <dt>OKE version</dt><dd>${escapeHtml(platform.kubernetes_version || '—')}</dd>
-      <dt>Derived minor</dt><dd>${escapeHtml(platform.kubernetes_minor || '—')}</dd>
-      <dt>Ubuntu</dt><dd>${escapeHtml(ubuntuLabel(platform.ubuntu_release))}</dd>
-      <dt>OKE node package</dt><dd><code>${escapeHtml(platform.oke_node_package || '—')}</code></dd>
-    </dl>
-    <details><summary>Derived repository</summary><code class="wrap-code">${escapeHtml(platform.oke_repo_url || '—')}</code></details>
-    <p class="doc-links"><a href="https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengCompatibilitymatrix_topic.htm" target="_blank" rel="noreferrer">Oracle Ubuntu node package compatibility ↗</a></p>`;
-}
-
-function setFormValues(data) {
-  const rdma = data.rdma || {};
-  $('#rdma-mtu').value = Number(rdma.mtu || 0) || '';
-  $('#rdma-vfs').value = Number(rdma.vfs_per_node || 2);
-  $('#rdma-resource').value = rdma.resource_name || String(rdma.resource || '').replace(/^nvidia\.com\//, '') || 'oci_rdma_vf';
-  $('#rdma-pool').value = rdma.ip_pool || '10.239.251.0/24';
-  $('#rdma-image').value = rdma.tools_image || '';
-  populatePfSelect(rdma.pf || '');
-
-  const locks = data.configuration_status || {};
-  for (const id of ['rdma-pf', 'rdma-mtu', 'rdma-vfs', 'rdma-resource']) {
-    $(`#${id}`).disabled = Boolean(locks.hardware_fields_locked);
-  }
-  $('#rdma-pool').disabled = Boolean(locks.network_fields_locked);
-  const notes = [];
-  if (locks.hardware_fields_locked) notes.push('VF policy exists: PF/MTU/VF/resource settings are locked.');
-  if (locks.network_fields_locked) notes.push('VF network exists: IP pool is locked.');
-  $('#config-lock-note').textContent = notes.join(' ');
-}
-
-function populatePfSelect(current = '') {
-  const select = $('#rdma-pf');
-  const candidates = discovery?.common_candidates || [];
-  const eligible = candidates.filter(candidate => candidate.eligible);
-  const options = [];
-  if (current && !eligible.some(candidate => candidate.name === current)) {
-    options.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} · saved setting, currently not eligible</option>`);
-  }
-  for (const candidate of eligible) {
-    const selected = candidate.name === current ? 'selected' : '';
-    options.push(`<option value="${escapeHtml(candidate.name)}" ${selected}>${escapeHtml(candidate.name)} · MTU ${escapeHtml(candidate.mtu)} · ${escapeHtml(candidate.drivers.join(', '))}</option>`);
-  }
-  select.innerHTML = options.length ? options.join('') : '<option value="">No healthy common PF discovered</option>';
-  if (!current && discovery?.recommended?.name) {
-    select.value = discovery.recommended.name;
-    $('#rdma-mtu').value = discovery.recommended.mtu;
-  }
-}
-
-function renderDiscovery(data) {
-  discovery = data;
-  const candidates = data.common_candidates || [];
-  const nodes = data.nodes || [];
-  const recommended = data.recommended;
-  const blockers = (data.blockers || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
-  const candidateHtml = candidates.length ? `
-    <div class="candidate-list">
-      ${candidates.map(candidate => {
-        const classes = ['candidate'];
-        if (recommended?.name === candidate.name) classes.push('recommended');
-        if (!candidate.eligible) classes.push('blocked');
-        const details = candidate.eligible
-          ? `Eligible OCI RDMA PF · MTU ${candidate.mtu} · min ${candidate.min_total_vfs} total VFs`
-          : `Not eligible · MTU ${candidate.mtu ?? candidate.mtus.join('/')} · ${candidate.blockers.join(' ')}`;
-        return `<button type="button" class="${classes.join(' ')}" data-pf="${escapeHtml(candidate.name)}" ${candidate.eligible ? '' : 'disabled'}>
-          <strong>${escapeHtml(candidate.name)}</strong>
-          <span>${escapeHtml(details)}</span>
-        </button>`;
-      }).join('')}
-    </div>` : '<p class="error">No PF name is reported as SR-IOV-capable on every selected RDMA node.</p>';
-
-  const nodeRows = nodes.map(node => {
-    const interfaces = (node.interfaces || []).map(iface => `${iface.name} (${iface.driver || 'driver ?'}, MTU ${iface.mtu}, totalVFs ${iface.total_vfs}, admin ${iface.link_admin_state || 'unknown'})`).join(', ') || 'No SR-IOV-capable interface reported';
-    return `<tr><td>${escapeHtml(node.name)}</td><td>${escapeHtml(node.sync_status)}</td><td>${escapeHtml(interfaces)}</td></tr>`;
-  }).join('');
-
-  $('#discovery').innerHTML = `
-    <div class="discovery-summary"><strong>${escapeHtml(data.nodes_reporting_state)}/${escapeHtml(data.nodes_expected)}</strong> RDMA workers reporting SR-IOV node state</div>
-    ${blockers ? `<div class="callout danger-callout"><strong>Resolve before configuring VFs</strong><ul>${blockers}</ul></div>` : ''}
-    ${candidateHtml}
-    <details><summary>Per-node inventory</summary>
-      <div class="table-wrap"><table><thead><tr><th>Node</th><th>SR-IOV sync</th><th>Interfaces</th></tr></thead><tbody>${nodeRows}</tbody></table></div>
-    </details>
-    <p class="muted">${escapeHtml(data.note || '')}</p>`;
-
-  populatePfSelect(env?.rdma?.pf || recommended?.name || '');
-  $$('.candidate:not(:disabled)').forEach(button => button.addEventListener('click', () => {
-    const candidate = candidates.find(item => item.name === button.dataset.pf);
-    if (!candidate) return;
-    $('#rdma-pf').value = candidate.name;
-    $('#rdma-mtu').value = candidate.mtu;
-    toast(`Selected healthy PF ${candidate.name}`);
-  }));
-}
-
-function renderEnvironment(data) {
-  env = data;
-  $('#env-name').textContent = data.environment_name;
-  $('#mode-pill').textContent = data.mode === 'demo' ? 'Demo — no cloud changes' : 'Live private operator';
-  renderPlatform(data.platform || {});
-
-  const ready = data.nodes.filter(node => node.ready).length;
-  const expectedVfs = Number(data.rdma.vfs_per_node || 1);
-  const vfNodes = data.nodes.filter(node => Number(node.vf_allocatable || 0) >= expectedVfs).length;
-  const vfReady = Boolean(data.vf_reconciliation?.ready);
-  const pf = data.rdma.configured ? data.rdma.pf : 'Not selected';
-  const mtuNote = data.rdma.configured ? `MTU ${data.rdma.mtu}` : 'Discover and configure after node health is green';
-  const networkOperator = (data.addons || []).find(addon => String(addon.name).toLowerCase() === 'nvidianetworkoperator'.toLowerCase() || String(addon.name).toLowerCase().includes('nvidia'));
-
-  $('#metrics').innerHTML = [
-    metric('RDMA workers', data.node_count, `${ready} Ready`),
-    metric('Network Operator', networkOperator?.state || 'Unknown', networkOperator?.version || 'Version unavailable'),
-    metric('Live RDMA PF', pf, mtuNote),
-    metric('VF reconciliation', vfReady ? 'Ready' : 'Not ready', `${vfNodes}/${data.node_count} nodes at expected capacity`),
-  ].join('');
-
-  setFormValues(data);
-
-  const configured = Boolean(data.rdma.configured);
-  const policyExists = Boolean(data.configuration_status?.policy_exists);
-  const vfSummary = configured ? `
-    <dl class="summary">
-      <dt>Physical function</dt><dd>${escapeHtml(data.rdma.pf)}</dd>
-      <dt>MTU</dt><dd>${escapeHtml(data.rdma.mtu)}</dd>
-      <dt>VFs per node</dt><dd>${escapeHtml(data.rdma.vfs_per_node)}</dd>
-      <dt>Resource</dt><dd>${escapeHtml(data.rdma.resource)}</dd>
-    </dl>` : '<div class="callout">Query the managed nodes, discover a healthy common PF, then save RDMA settings.</div>';
-
-  $('#vf-card').innerHTML = `
-    <h3>3. VF policy</h3>
-    <p>Creates an RDMA-capable <code>SriovNetworkNodePolicy</code> only on nodes labelled <code>oci-rdma=true</code>.</p>
-    ${vfSummary}
-    <div class="callout">Applying this policy can drain or reconfigure RDMA nodes. Live node state is rechecked immediately before Apply.</div>
-    <button class="danger" id="configure-vfs" ${configured && !policyExists ? '' : 'disabled'}>${policyExists ? 'VF policy already exists' : configured ? 'Approve VF configuration' : 'Save healthy RDMA settings first'}</button>`;
-  $('#configure-vfs').addEventListener('click', () => confirmAction('configure_vfs', 'Approve VF configuration', 'This can drain or reconfigure RDMA nodes. Type the exact environment name to continue.'));
-
-  const vfStatus = vfReady
-    ? '<span class="state SUCCEEDED">VF reconciliation ready</span>'
-    : '<span class="state RUNNING">Waiting for VF reconciliation</span>';
-  const vfDetail = (data.vf_reconciliation?.nodes || []).map(node => typeof node === 'string' ? escapeHtml(node) :
-    `${escapeHtml(node.name)}: ${escapeHtml(node.sync_status)} · ${escapeHtml(node.vf_allocatable)}/${escapeHtml(node.expected_vfs)} VFs`
-  ).join('<br>');
-  const networkExists = Boolean(data.configuration_status?.network_exists);
-  $('#net-card').innerHTML = `
-    <h3>4. VF network</h3>
-    <p>Creates the workload namespace, NVIDIA IPAM pool and <code>SriovNetwork</code> only after every selected RDMA node has reconciled successfully.</p>
-    <p>${vfStatus}</p>
-    ${vfDetail ? `<p class="node-readiness">${vfDetail}</p>` : ''}
-    <dl class="summary"><dt>Pool</dt><dd>${escapeHtml(data.rdma.ip_pool)}</dd><dt>Network</dt><dd>${escapeHtml(data.environment_name)}-rdma-vf</dd></dl>
-    <div class="callout">The backend requires <code>syncStatus=Succeeded</code> and at least ${escapeHtml(expectedVfs)} allocatable ${escapeHtml(data.rdma.resource)} VF(s) on every RDMA node.</div>
-    <button class="danger" id="configure-network" ${vfReady && !networkExists ? '' : 'disabled'}>${networkExists ? 'VF network already exists' : vfReady ? 'Approve VF network' : 'Waiting for VFs'}</button>`;
-  $('#configure-network').addEventListener('click', () => confirmAction('configure_network', 'Approve VF network', 'This writes cluster networking resources. Type the exact environment name to continue.'));
-
-  const validationButton = $('#run-validation');
-  const canValidate = vfReady && networkExists && Boolean(data.rdma.tools_image_configured);
-  validationButton.disabled = !canValidate;
-  validationButton.title = canValidate ? '' : 'Complete VF/network configuration and configure an immutable RDMA tools image first.';
-  $('#validation-image-state').textContent = data.rdma.tools_image_configured
-    ? `Validation image: ${data.rdma.tools_image}`
-    : 'Configure an immutable RDMA tools image in SR-IOV & VFs.';
-}
-
-function renderPreflight(data) {
-  const host = $('#preflight');
-  host.innerHTML = data.checks.map(check => {
-    const detail = typeof check.detail === 'string' ? check.detail : JSON.stringify(check.detail, null, 2);
-    return `<div class="check"><span class="dot ${escapeHtml(check.status)}"></span><div><strong>${escapeHtml(check.name)}</strong><small><pre>${escapeHtml(detail)}</pre></small></div></div>`;
-  }).join('');
-  if (data.blocking) toast(`${data.blocking} blocking preflight issue(s)`); else toast('Preflight has no blocking checks');
-}
-
-function pluginBadge(plugin) {
-  const status = String(plugin.status || 'UNKNOWN').toUpperCase();
-  const css = status === 'RUNNING' ? 'SUCCEEDED' : status === 'STOPPED' ? 'FAILED' : 'RUNNING';
-  return `<span class="state ${css}">${escapeHtml(status)}</span>`;
-}
-
-function renderNodeDiagnostics(data) {
-  nodeReport = data;
-  $('#download-node-report').disabled = false;
-  const summary = data.summary || {};
-  const recommended = summary.recommended_pf;
-  const overallClass = data.overall === 'pass' ? 'SUCCEEDED' : data.overall === 'block' ? 'FAILED' : 'RUNNING';
-  const cards = (data.nodes || []).map(node => {
-    const issueHtml = (node.issues || []).length
-      ? `<ul class="issue-list">${node.issues.map(issue => `<li class="${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join('')}</ul>`
-      : '<p class="good-text">No blocking node issue detected by the API-level checks.</p>';
-    const plugins = (node.plugins || []).map(plugin => `<tr><td>${escapeHtml(plugin.name)}</td><td>${pluginBadge(plugin)}</td><td>${escapeHtml(plugin.message || '')}</td></tr>`).join('');
-    const interfaces = (node.interfaces || []).map(iface => `<tr><td><code>${escapeHtml(iface.name)}</code></td><td>${escapeHtml(iface.driver)}</td><td>${escapeHtml(iface.mtu)}</td><td>${escapeHtml(iface.num_vfs)}/${escapeHtml(iface.total_vfs)}</td><td>${escapeHtml(iface.link_admin_state || 'unknown')}</td></tr>`).join('');
-    return `<article class="card node-card">
-      <div class="card-head"><div><h3>${escapeHtml(node.name)}</h3><p class="muted">${escapeHtml(node.internal_ip || 'No InternalIP')} · ${escapeHtml(node.instance?.shape || 'Shape unavailable')}</p></div><span class="state ${node.status === 'pass' ? 'SUCCEEDED' : node.status === 'block' ? 'FAILED' : 'RUNNING'}">${escapeHtml(node.status)}</span></div>
-      <dl class="summary compact">
-        <dt>Kubernetes</dt><dd>${node.ready ? 'Ready' : 'Not Ready'}</dd>
-        <dt>OCI instance</dt><dd>${escapeHtml(node.instance?.lifecycle_state || 'Unavailable')}</dd>
-        <dt>SR-IOV sync</dt><dd>${escapeHtml(node.sriov_sync_status)}</dd>
-        <dt>VF allocatable</dt><dd>${escapeHtml(node.vf_allocatable)}</dd>
-        <dt>OS / kernel</dt><dd>${escapeHtml(node.os_image || '—')} · ${escapeHtml(node.kernel_version || '—')}</dd>
-      </dl>
-      ${issueHtml}
-      <details><summary>Oracle Cloud Agent RDMA plugins</summary><div class="table-wrap"><table><thead><tr><th>Plugin</th><th>Status</th><th>Message</th></tr></thead><tbody>${plugins}</tbody></table></div></details>
-      <details><summary>SR-IOV interfaces</summary><div class="table-wrap"><table><thead><tr><th>PF</th><th>Driver</th><th>MTU</th><th>VFs</th><th>Admin state</th></tr></thead><tbody>${interfaces || '<tr><td colspan="5">No interfaces reported</td></tr>'}</tbody></table></div></details>
-      <details><summary>Break-glass host inspection command</summary><p>This command is displayed for an administrator; the web service never executes it.</p><code class="wrap-code">${escapeHtml(node.break_glass_command)}</code></details>
-    </article>`;
-  }).join('');
-
-  $('#node-diagnostics').innerHTML = `
-    <div class="node-summary">
-      <span class="state ${overallClass}">${escapeHtml(data.overall)}</span>
-      <strong>${escapeHtml(summary.ready || 0)}/${escapeHtml(summary.total || 0)}</strong> Kubernetes Ready ·
-      <strong>${escapeHtml(summary.plugin_healthy || 0)}/${escapeHtml(summary.total || 0)}</strong> RDMA plugins healthy ·
-      <strong>${escapeHtml(recommended?.name || 'No healthy common PF')}</strong>${recommended ? ` at MTU ${escapeHtml(recommended.mtu)}` : ''}
-    </div>
-    ${(summary.discovery_blockers || []).length ? `<div class="callout danger-callout"><strong>VF configuration blocked</strong><ul>${summary.discovery_blockers.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>` : ''}
-    <div class="node-grid">${cards}</div>
-    <p class="muted">${escapeHtml(data.note || '')}</p>`;
-}
-
-async function refreshEnvironment() {
-  renderEnvironment(await api('/api/v1/environment'));
-}
-
-async function refreshPreflight() {
-  $('#preflight').textContent = 'Running checks…';
-  try { renderPreflight(await api('/api/v1/preflight')); }
-  catch (error) { $('#preflight').innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`; }
-}
-
-async function refreshNodeDiagnostics() {
-  $('#node-diagnostics').textContent = 'Querying Kubernetes nodes, SR-IOV state and OCI Instance Agent plugins…';
-  $('#download-node-report').disabled = true;
-  try {
-    renderNodeDiagnostics(await api('/api/v1/nodes'));
-    toast('Managed-node diagnostics refreshed');
-  } catch (error) {
-    $('#node-diagnostics').innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`;
+function reportLinks(r){return `<div class="report-actions">${Object.entries(r||{}).map(([kind,url])=>`<button class="secondary download" data-url="${esc(url)}" data-name="host-diagnostic.${kind==='text'?'txt':'json'}">Download ${esc(kind)}</button>`).join('')}</div>`;}
+function replaceJobMarkup(element,html){
+  const opened=[...element.querySelectorAll('details[open]')].map(d=>{
+    if(d.dataset.historyId)return {history:d.dataset.historyId};
+    const job=d.closest('[data-job-id]');return job?{job:job.dataset.jobId,index:[...job.querySelectorAll('details')].indexOf(d)}:null;
+  }).filter(Boolean);
+  element.innerHTML=html;
+  for(const saved of opened){
+    if(saved.history){const d=[...element.querySelectorAll('[data-history-id]')].find(d=>d.dataset.historyId===saved.history);if(d)d.open=true;}
+    else {const job=[...element.querySelectorAll('[data-job-id]')].find(j=>j.dataset.jobId===saved.job);const d=job?.querySelectorAll('details')[saved.index];if(d)d.open=true;}
   }
 }
-
-function downloadNodeReport() {
-  if (!nodeReport) return;
-  const blob = new Blob([JSON.stringify(nodeReport, null, 2)], {type: 'application/json'});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `${env?.environment_name || 'oke-rdma'}-node-diagnostics.json`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+function renderJobs(){const filter=$('#job-filter').value,showHistory=$('#show-history').checked,seen=new Set();
+const matching=jobs.filter(j=>filter==='all'||j.action===filter||j.state===filter||(filter==='capacity'&&j.action.startsWith('capacity_')));
+const latest=matching.filter(j=>{if(seen.has(j.action))return false;seen.add(j.action);return true;});
+$('#history-count').textContent=`${matching.length-latest.length} earlier attempts retained`;
+replaceJobMarkup($('#jobs-list'),(showHistory||filter==='FAILED'?matching:latest).map(j=>{const earlier=jobs.find(x=>x.action===j.action)?.id!==j.id;return earlier?`<details class="history-job" data-history-id="${esc(j.id)}"><summary>Earlier attempt · ${esc(title[j.action]||j.action)} · ${esc(stateLabel(j.state))} · ${esc(time(j.requested_at))}</summary>${renderJob(j)}</details>`:renderJob(j);}).join('')||'<p class="empty">No matching operations recorded.</p>');for(const el of $$('[data-result]')){const j=jobs.find(x=>x.action===el.dataset.result&&(x.action==='reset_rdma'||x.requested_at>(env.reset_at||0))&&(!['node_diagnostic','recovery_restart_assess','recovery_assess','recovery_run','recovery_finish'].includes(x.action)||!inspectedNode||(x.payload?.node_name||x.result?.node_name||x.result?.recovery?.node_name)===inspectedNode));replaceJobMarkup(el,j?renderJob(j):'');}
+renderMeasurement();
+const active=jobs.find(j=>['QUEUED','RUNNING'].includes(j.state));busy=Boolean(active);$('#active-operation').hidden=!active;
+if(active)$('#active-operation').innerHTML=`<div class="card-heading"><strong>${esc(title[active.action]||active.action)}</strong><a href="${active.action.startsWith('capacity_')?'#capacity':active.action==='reset_rdma'?'#maintenance':'#workflow'}">Open task →</a></div>${operationProgress(active)}`;
+if(env)renderSetup();updateDisabled();}
+function hostsReady(){const selected=env.nodes.filter(n=>n.mode==='dranet');return selected.length>0&&selected.every(n=>!n.host_issues.length);}
+function renderSetup(){
+  const measured=Boolean(env.measurement_status?.validation_current);
+  const complete=[Boolean(env.rdma.rdma_tools_image),hostsReady(),env.driver_ready,measured];
+  const names=['Configuration','Host readiness','Dranet','RDMA validation'],ids=['config','hosts','install','validation'];
+  const actions=['','check_hosts','install_dranet','rdma_validation'];
+  $('#setup-progress').innerHTML=names.map((name,i)=>{const job=jobs.find(j=>j.action===actions[i]&&j.requested_at>(env.reset_at||0)),active=job&&['QUEUED','RUNNING'].includes(job.state);const label=active?stateLabel(job.state):complete[i]?'Complete':i===0||complete.slice(0,i).every(Boolean)?'Next':'Pending';return `<div class="${active?'current':complete[i]?'done':''}"><span>${i+1}</span><strong>${esc(name)}</strong><small>${esc(label)}</small></div>`;}).join('');
+  const count=complete.filter(Boolean).length;
+  $('#setup-notice').hidden=count===4;
+  $('#setup-notice').textContent=`RDMA setup and validation: ${count} of 4 steps complete. ${!env.driver_installed?'Dranet has not been installed yet. This is an expected setup state. ':''}Follow the guided workflow below to configure the image, check hosts, enable Dranet, then measure bandwidth and latency.`;
+  for(let i=1;i<4;i++){const job=jobs.find(j=>j.action===actions[i]&&j.requested_at>(env.reset_at||0));if(job&&['QUEUED','RUNNING'].includes(job.state)){const el=$('#'+ids[i]+'-state');el.textContent=stateLabel(job.state);el.className='badge running';}else if(job?.state==='FAILED'){const el=$('#'+ids[i]+'-state');el.textContent='Last run failed';el.className='badge warn';}}
 }
 
-async function discoverHardware() {
-  $('#discovery').textContent = 'Reading live SR-IOV node state…';
-  try {
-    renderDiscovery(await api('/api/v1/rdma/discovery'));
-    toast(discovery.recommended ? 'Healthy RDMA PF discovered' : 'Discovery completed with blockers');
-  } catch (error) {
-    $('#discovery').innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`;
-  }
+function capacityPending(){return capacity?.operation&&!['COMPLETE','DISCARDED'].includes(capacity.operation.phase);}
+function updateDisabled(){if(!env)return;$$('[data-action]').forEach(b=>{b.disabled=busy||(replacementPending()&&!['check_hosts','cleanup_validation'].includes(b.dataset.action))||(capacityPending()&&!['check_hosts'].includes(b.dataset.action))||(b.dataset.action==='rdma_validation'&&(!env.driver_ready||env.capacity.free<2||!env.rdma.rdma_tools_image||!hostsReady()))||(b.dataset.action==='check_hosts'&&(!env.rdma.rdma_tools_image||!env.nodes.length))||(b.dataset.action==='install_dranet'&&!hostsReady());});$('#save-settings').disabled=busy||Boolean(capacityPending())||Boolean(replacementPending());$('#preview-reset').disabled=busy||Boolean(capacityPending())||Boolean(replacementPending());$('#run-diagnostic').disabled=busy||!catalog?.image_configured;renderCapacity();enforceRequestLocks();}
+async function refresh(){
+  if(refreshFlight)return refreshFlight;
+  const epoch=++jobsEpoch;refreshFlight=(async()=>{try{const [e,j]=await Promise.all([api('/api/v1/environment'),api('/api/v1/jobs')]);env=e;if(epoch===jobsEpoch)jobs=j.items;renderJobs();renderEnvironment();$('#connection-error').hidden=true;void loadCapacity();}catch(e){$('#connection-error').textContent=e.message;$('#connection-error').hidden=false;throw e;}})();
+  try{return await refreshFlight;}finally{refreshFlight=null;}
 }
-
-async function saveRdmaConfig(event) {
-  event.preventDefault();
-  const payload = {
-    rdma_pf_name: $('#rdma-pf').value.trim(),
-    rdma_mtu: Number($('#rdma-mtu').value),
-    rdma_vfs_per_node: Number($('#rdma-vfs').value),
-    rdma_resource_name: $('#rdma-resource').value.trim(),
-    rdma_ip_pool_cidr: $('#rdma-pool').value.trim(),
-    rdma_tools_image: $('#rdma-image').value.trim(),
-  };
-  try {
-    await api('/api/v1/rdma/config', {method: 'PUT', body: JSON.stringify(payload)});
-    toast('Healthy RDMA settings saved');
-    await refreshEnvironment();
-  } catch (error) { toast(error.message); }
+async function poll(){if(!token)return;try{const epoch=++jobsEpoch,data=await api('/api/v1/jobs');if(epoch===jobsEpoch){jobs=data.items;renderJobs();}if(busy&&jobs[0]?.action.startsWith('capacity_')&&Date.now()-capacityUpdatedAt>10000)void loadCapacity();if(!busy)void refresh().catch(e=>toast(e.message));}catch(e){toast(e.message);}finally{if(token)pollTimer=setTimeout(poll,busy?2000:15000);}}
+async function download(url,name){const r=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok){const d=await r.json();throw new Error(typeof d.detail==='string'?d.detail:d.detail?.message||'Download failed');}const blob=await r.blob(),href=URL.createObjectURL(blob),a=document.createElement('a');a.href=href;a.download=name;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(href);}
+function confirmationPhrase(action){return ({replacement_run:'REPLACE ',replacement_close:'CLOSE ',recovery_run:'RECOVER ',recovery_finish:'FINISH ',reset_rdma:'RESET ',capacity_apply:'SCALE ',capacity_discard:'DISCARD ',capacity_close:'CLOSE '}[action]||'')+env.environment_name;}
+function confirm(action,payload={}){
+  $('#confirm-preview').innerHTML='';$('#confirm-form button[type=submit]').disabled=false;$('#confirm-form button[type=submit]').textContent=action==='reset_rdma'?'Reset RDMA setup':action==='capacity_apply'?'Apply reviewed plan':'Run operation';pending={action,payload};$('#confirm-title').textContent=title[action];const copy={replacement_preview:'Read-only review of the selected instance, pinned image, workload blockers and replacement impact.',replacement_run:`Terminate ${jobs.find(j=>j.action==='replacement_preview'&&j.result?.id===payload.replacement_id)?.result?.node_name||'the reviewed worker'} (${jobs.find(j=>j.action==='replacement_preview'&&j.result?.id===payload.replacement_id)?.result?.instance_id||'see preview'}) and replace it at the same pool size. OKE uses a 60-minute drain grace with forced deletion disabled. Admission protection temporarily blocks new claims cluster-wide. Pause controllers and external stack changes.`,replacement_resume:'Observe the recorded OKE operation and verify the new worker. Never submits another deletion. May run a quick cross-node benchmark on free workers.',replacement_close:'Close only a safely reconciled operation. Remove its admission protection; an existing original worker stays cordoned. This does not mark RDMA verification successful.',recovery_restart_assess:'Collect read-only evidence for an explicit single-worker Oracle Cloud Agent restart. This preview does not restart the service.',recovery_assess:'Collect current host, metadata and OCA failure evidence. No service restart.',recovery_run:'Restart Oracle Cloud Agent once on the reviewed worker. Verified standard CoreDNS pods remain running. Application workloads and claims must be absent. This briefly interrupts its other agent plugins. A cordon and admission guard block new pods targeting this worker. All existing resource claims/templates block recovery; new claims/templates are temporarily blocked cluster-wide. Pause controllers and do not bypass protection. Failure leaves protection in place until Finish recorded recovery.',recovery_finish:'Remove retained recovery pod and admission protection WITHOUT restarting OCA again. Worker remains cordoned for administrator review.',capacity_plan:`Update the stack target and generate a Terraform plan for ${payload.target_node_count} workers. This does not resize infrastructure.`,capacity_apply:`Apply the reviewed node-count plan: ${capacity?.operation?.before} → ${capacity?.operation?.target} workers. Scale-in terminates workers after safe draining.`,capacity_discard:'Restore the previous stack node-count target. No apply job will be submitted.',capacity_resume:'Monitor the recorded OCI job and continue readiness verification. An existing apply will not be submitted again.',capacity_close:'Acknowledge a terminal failed apply and release the local operation lock. Stack variables and infrastructure remain as observed; review them before creating a new plan.',reset_rdma:'Remove the RDMA setup listed below. Existing application claims block this operation. Infrastructure provisioned by Terraform will remain.',check_hosts:'Collect fixed host inventory on the selected Dranet nodes. This creates and removes short-lived privileged diagnostic pods.',install_dranet:'Install the pinned Dranet driver and DeviceClass on the selected nodes, or verify an existing installation. The infrastructure daemon is privileged.',rdma_validation:'Reserve one physical RDMA NIC on each of two workers, run bounded RDMA-CM bandwidth and latency tests, then remove the test pods and claims.',cleanup_validation:'Remove only pods and claims labelled as this Control Center’s Dranet validation resources.',node_diagnostic:`Run the fixed ${payload.profile} profile on ${payload.node_name}. A short-lived privileged pod collects a report and is removed.`};$('#confirm-copy').textContent=copy[action]+(action==='rdma_validation'?' Profile: '+(payload.performance_profile||'quick')+'. Extended tests generate deliberate traffic. Matrix covers all free workers up to eight; automatic MPI reserves up to eight workers, one rank each. Other profiles use the selected pair. MPI starts temporary SSH only inside test pods and briefly adds the capabilities required by sshd. NUMA test pods add SYS_NICE for CPU/memory policy operations and require permitted CPU/memory binding. A new tools image is required for MPI and NUMA.':'')+(action.startsWith('recovery_')?' Worker: '+inspectedNode+'.':'');$('#confirm-label').textContent=`Type ${confirmationPhrase(action)} to run`;$('#confirm-input').value='';$('#confirm-error').textContent='';$('#confirm-dialog').showModal();$('#confirm-input').focus();}
+async function inspectNode(name,profile=""){inspectedNode=name;const n=env.nodes.find(n=>n.name===name);$('#node-title').textContent=name;$('#node-detail').innerHTML=`<dl class="facts"><dt>Mode</dt><dd>${esc(n.mode)}</dd><dt>Kernel</dt><dd>${esc(n.kernel)}</dd><dt>OCI instance</dt><dd>${esc(n.instance_id||'Not published')}</dd><dt>Server serial</dt><dd>${esc(n.hardware_identity?.system_serial||'Not collected')}</dd><dt>Selected PF MAC</dt><dd>${esc(n.hardware_identity?.pf_mac||'Not collected')}</dd><dt>Host evidence</dt><dd>${esc(time(n.host_check_at))}</dd></dl>${[...n.issues,...(n.host_issues||[])].map(x=>`<p class="error">${esc(x)}</p>`).join('')}${(n.hardware_identity?.reuse_matches||[]).map(m=>`<p class="error">${esc(m.message)} Previous instance: ${esc(m.previous.instance_id)}</p>`).join('')}<details><summary>Complete NIC and topology inventory</summary><pre>${esc(JSON.stringify(n.devices,null,2))}</pre></details>`;$('#node-dialog').showModal();$('#run-diagnostic').disabled=true;$('#diagnostic-description').textContent='Loading diagnostic profiles…';if(!catalog)catalog=await api('/api/v1/diagnostics/profiles');$('#diagnostic-profile').innerHTML=catalog.profiles.map(p=>`<option value="${esc(p.name)}">${esc(p.title)}</option>`).join('');if(profile&&catalog.profiles.some(p=>p.name===profile))$('#diagnostic-profile').value=profile;profileDescription();renderJobs();renderRecovery();}
+function profileDescription(){const p=catalog?.profiles.find(p=>p.name===$('#diagnostic-profile').value);$('#diagnostic-description').textContent=p?`${p.description} Hard timeout ${p.timeout_seconds}s.`:'';}
+$('#login-form').addEventListener('submit',e=>{e.preventDefault();void withFeedback($('#login-form button[type=submit]'),'Connecting…',async()=>{token=$('#token').value.trim();try{await api('/api/v1/session',{method:'POST'});await refresh();$('#login').hidden=true;$('#app').hidden=false;routeWorkspace();$('#token').value='';catalog=await api('/api/v1/diagnostics/profiles');updateDisabled();clearTimeout(pollTimer);pollTimer=setTimeout(poll,2000);}catch(err){token='';$('#login-error').textContent=err.message;}}).catch(e=>toast(e.message));});
+async function loadCapacity(){
+  if(capacityFlight)return capacityFlight;
+  capacityFlight=(async()=>{try{capacity=await api('/api/v1/capacity');capacityUpdatedAt=Date.now();renderOnboarding();$('#capacity-error').hidden=!capacity.error;if(capacity.error)$('#capacity-error').textContent=capacity.error;updateDisabled();}
+  catch(e){$('#capacity-error').textContent=e.message;$('#capacity-error').hidden=false;}})();
+  try{return await capacityFlight;}finally{capacityFlight=null;}
 }
-
-function stateClass(state) { return `state ${escapeHtml(state)}`; }
-
-function renderJob(job) {
-  const result = job.result ? `<pre>${escapeHtml(JSON.stringify(job.result, null, 2))}</pre>` : '';
-  const error = job.error ? `<p class="error">${escapeHtml(job.error)}</p>` : '';
-  const events = (job.events || []).map(event => `<small>${escapeHtml(event.level)} · ${escapeHtml(event.message)}</small>`).join('<br>');
-  return `<article class="job"><div class="job-head"><div><strong>${escapeHtml(job.action)}</strong><br><small>${escapeHtml(job.id)}</small></div><span class="${stateClass(job.state)}">${escapeHtml(job.state)}</span></div>${error}${result}${events ? `<details><summary>Activity</summary>${events}</details>` : ''}</article>`;
+function renderCapacity(){
+  if(!capacity)return;
+  const op=capacity.operation,pending=Boolean(capacityPending()),locked=pending||Boolean(replacementPending());
+  $('#capacity-connection-state').textContent=capacity.configured?'Connected':'Setup required';
+  $('#capacity-connection-state').className=`badge ${capacity.configured?'good':''}`;
+  if(!connectionDirty&&document.activeElement!==$('#capacity-stack-id'))$('#capacity-stack-id').value=capacity.stack_id||'';
+  $('#capacity-desired').textContent=capacity.desired??'—';$('#capacity-ready').textContent=capacity.ready??'—';
+  const names=new Set(capacity.pool_members||[]);$('#capacity-rdma-ready').textContent=env?env.nodes.filter(n=>names.has(n.name)&&n.ready&&!n.issues.length&&!n.host_issues.length&&n.devices.some(d=>d.valid!==false)).length:'—';
+  $('#capacity-confirm-label').textContent=`Type ${env.environment_name} to confirm this environment`;
+  $('#capacity-readiness').disabled=busy||locked||!capacity.configured;
+  $('#capacity-connect').disabled=busy||locked;$('#capacity-target').disabled=busy||locked;
+  $('#capacity-plan').disabled=busy||locked||!capacity.configured||Boolean(capacity.error)||!capacityCheck?.can_plan||capacityCheck.target!==Number($('#capacity-target').value)||Date.now()/1000-capacityCheck.checked_at>300;
+  const operationMarkup=op?`<div class="notice"><strong>${esc(op.phase.replaceAll('_',' '))} · ${esc(op.before)} → ${esc(op.target)} workers</strong><p>${op.phase==='AWAITING_REVIEW'?'Infrastructure has not been resized. Review the size-only plan and apply it, or discard the target.':op.phase==='DISCARDED'?'Previous stack target restored; no resize was applied.':op.phase==='COMPLETE'?`Operation finished · RDMA readiness ${esc(op.readiness||'not verified')}. Review the result below.`:op.phase==='PLAN_BLOCKED'?'Scaling was not applied. Review the blocked fields, then discard the target before a new plan.':'Requested stack target may differ from running capacity. A plan alone does not resize workers. This operation is retained across service restarts.'}</p>${capacity.timing?`<h4>Time until usable RDMA capacity</h4><table><tr><th>Milestone</th><th>Seconds since apply</th></tr>${Object.entries(capacity.timing.seconds_since_apply).map(([k,v])=>`<tr><td>${esc(k.replaceAll('_',' '))}</td><td>${v==null?'Not observed':Number(v).toFixed(1)}</td></tr>`).join('')}</table><p>${esc(capacity.timing.note)}</p>${op.node_stage_evidence?`<table><tr><th>New worker</th><th>Registered</th><th>Kubernetes Ready</th></tr>${op.node_stage_evidence.map(n=>`<tr><td>${esc(n.name)}</td><td>${esc(n.registered_at||'Unknown')}</td><td>${esc(n.ready_at||'Unknown')}</td></tr>`).join('')}</table>`:''}`:''}${op.timeline?`<details><summary>Observed capacity timeline</summary>${op.timeline.map(e=>`<p>${esc(e.phase)} · ${esc(time(e.observed_at))}</p>`).join('')}${Object.entries(op.milestones||{}).map(([k,v])=>`<p>${esc(k)} · ${esc(time(v))}</p>`).join('')}<p>Observation times; provisioning and authentication substage durations are not independently measured.</p></details>`:''}${op.capacity_report?`<details><summary>OCI capacity report before planning</summary><pre>${esc(JSON.stringify(op.capacity_report,null,2))}</pre></details>`:''}${op.apply_capacity_report?`<details open><summary>OCI capacity report before apply</summary><pre>${esc(JSON.stringify(op.apply_capacity_report,null,2))}</pre></details>`:''}${op.blocked_reason?`<p class="error">${esc(op.blocked_reason)}</p>`:''}${op.plan_job_id?`<small>Plan job: ${esc(op.plan_job_id)}</small>`:''}${op.apply_job_id?`<small>Apply job: ${esc(op.apply_job_id)}</small>`:''}${op.review?`<details><summary>Reviewed Terraform changes</summary><pre>${esc(JSON.stringify(op.review.changes,null,2))}</pre></details>`:''}${op.expires_at&&op.phase==='AWAITING_REVIEW'?`<small>Plan approval expires ${esc(time(op.expires_at))}</small>`:''}</div>`:'';
+  const operationElement=$('#capacity-operation');if(operationElement._rendered!==operationMarkup){operationElement.innerHTML=operationMarkup;operationElement._rendered=operationMarkup;}
+  const visible={apply:pending&&op.phase==='AWAITING_REVIEW'&&Date.now()/1000<op.expires_at,discard:pending&&!op.apply_job_id&&op.phase!=='SUBMITTING_APPLY',resume:pending&&['PLAN_RUNNING','SUBMITTING_PLAN','APPLY_RUNNING','SUBMITTING_APPLY','VERIFYING_NODES','APPLY_FAILED'].includes(op.phase),close:pending&&op.phase==='APPLY_FAILED'};
+  for(const action of ['apply','discard','resume','close']){const button=$('#capacity-'+action);button.hidden=!visible[action];button.disabled=busy;}
+  enforceRequestLocks();
 }
-
-async function refreshJobs() {
-  if (!token) return;
-  try {
-    const data = await api('/api/v1/jobs');
-    $('#jobs-list').innerHTML = data.items.length ? data.items.map(renderJob).join('') : '<div class="empty">No operations yet.</div>';
-  } catch (error) { $('#jobs-list').innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`; }
-}
-
-async function queue(action, confirmation = '') {
-  const job = await api('/api/v1/jobs', {method: 'POST', body: JSON.stringify({action, confirmation})});
-  toast(`${action} queued`);
-  setPage('jobs');
-  await pollJob(job.id);
-}
-
-async function pollJob(id) {
-  for (let index = 0; index < 180; index += 1) {
-    const job = await api(`/api/v1/jobs/${encodeURIComponent(id)}`);
-    await refreshJobs();
-    if (['SUCCEEDED', 'FAILED'].includes(job.state)) {
-      toast(job.state === 'SUCCEEDED' ? 'Operation completed' : 'Operation failed');
-      refreshEnvironment().catch(() => {});
-      return job;
-    }
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-  toast('Operation is still running; see Activity');
-  return null;
-}
-
-function confirmAction(action, title, copy) {
-  pendingAction = action;
-  $('#confirm-title').textContent = title;
-  $('#confirm-copy').textContent = copy;
-  $('#confirm-input').value = '';
-  $('#confirm-dialog').showModal();
-}
-
-$('#confirm-form').addEventListener('submit', async event => {
-  if (event.submitter?.value === 'cancel') { pendingAction = null; return; }
-  event.preventDefault();
-  const confirmation = $('#confirm-input').value;
-  const action = pendingAction;
-  $('#confirm-dialog').close();
-  pendingAction = null;
-  if (!action) return;
-  try { await queue(action, confirmation); } catch (error) { toast(error.message); }
+$('#capacity-refresh').addEventListener('click',()=>withFeedback($('#capacity-refresh'),'Refreshing capacity…',async()=>{const b=$('#capacity-refresh');b.disabled=true;b.textContent='Refreshing…';try{await refresh();}finally{b.disabled=false;b.textContent='Refresh capacity';}}).catch(e=>toast(e.message)));
+$('#capacity-connection-form').addEventListener('submit',e=>{e.preventDefault();void withFeedback($('#capacity-connection-form button[type=submit]'),'Verifying connection…',async()=>{$('#stack-id-error').textContent='';$('#stack-confirm-error').textContent='';$('#capacity-connect').disabled=true;$('#capacity-connect-result').textContent='Verifying stack ownership…';try{await api('/api/v1/capacity/connection',{method:'PUT',body:JSON.stringify({stack_id:$('#capacity-stack-id').value.trim(),confirmation:$('#capacity-connect-confirm').value.trim()})});connectionDirty=false;capacityCheck=null;$('#capacity-connect-confirm').value='';$('#capacity-connect-result').textContent='Stack ownership verified and connection saved.';await loadCapacity();updateDisabled();}catch(e){$('#capacity-connect-result').textContent=e.message;const d=e.detail||{};for(const f of d.fields||[d]){const el=f.field==='stack_id'?$('#stack-id-error'):f.field==='confirmation'?$('#stack-confirm-error'):null;if(el)el.textContent=f.message;}}finally{renderCapacity();}}).catch(e=>toast(e.message));});
+$('#capacity-plan').addEventListener('click',()=>{const target=Number($('#capacity-target').value);if(!Number.isInteger(target)||target<0||target>64){toast('Choose a whole node count between 0 and 64.');return;}confirm('capacity_plan',{target_node_count:target});});
+for(const action of ['apply','discard','resume','close'])$('#capacity-'+action).addEventListener('click',()=>confirm('capacity_'+action,{capacity_operation_id:capacity.operation.operation_id}));
+$('#preview-reset').addEventListener('click',async()=>{
+  const button=$('#preview-reset');button.disabled=true;
+  confirm('reset_rdma',{});const request=pending;$('#confirm-preview').textContent='Loading the current removal plan…';$('#confirm-form button[type=submit]').disabled=true;
+  try{
+    const plan=await api('/api/v1/reset-plan');
+    if(pending!==request||!$('#confirm-dialog').open)return;
+    pending.payload.reset_plan_id=plan.plan_id;
+    $('#confirm-preview').innerHTML=`<h3>Resources to remove</h3>${plan.targets.length?'<ul>'+plan.targets.map(t=>`<li>${esc(t.kind)} · ${esc(t.namespace?t.namespace+'/':'')}${esc(t.name)}</li>`).join('')+'</ul>':'<p>No Kubernetes resources currently scheduled for removal.</p>'}<h3>Application state to reset</h3><ul>${plan.local_files.map(x=>`<li>${esc(x)}</li>`).join('')}</ul><h3>Retained</h3><ul>${plan.retained.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>${plan.blockers.length?'<h3>Reset blocked</h3>'+plan.blockers.map(x=>`<p class="error">${esc(x)}</p>`).join(''):''}`;
+    $('#confirm-form button[type=submit]').disabled=!plan.can_reset;
+  }catch(e){if(pending===request){$('#confirm-error').textContent=e.message;$('#confirm-preview').textContent='Could not load the removal plan. Close and retry.';}}finally{updateDisabled();}
 });
+$('#logout').addEventListener('click',lock);$('#refresh').addEventListener('click',()=>withFeedback($('#refresh'),'Refreshing…',()=>refresh().then(()=>toast('Inventory refreshed')).catch(e=>toast(e.message))).catch(e=>toast(e.message)));
+$('#settings-form').addEventListener('submit',e=>{e.preventDefault();void withFeedback($('#settings-form button[type=submit]'),'Saving…',async()=>{const payload={rdma_pf_name:$('#rdma-pf').value.trim(),rdma_mtu:4220,rdma_child_cidr:$('#rdma-child').value.trim(),rdma_tools_image:$('#rdma-image').value.trim(),rdma_image_pull_secret:$('#rdma-secret').value.trim(),rdma_tos:Number($('#rdma-tos').value)};try{await api('/api/v1/rdma/config',{method:'PUT',body:JSON.stringify(payload)});$('#settings-status').textContent='Saved. Continue with host readiness below.';catalog=await api('/api/v1/diagnostics/profiles');await refresh();$('#step-hosts').open=true;}catch(err){$('#settings-status').textContent=err.message;toast(err.message);}}).catch(e=>toast(e.message));});
+$('#preflight').addEventListener('click',()=>withFeedback($('#preflight'),'Checking readiness…',async()=>{try{const r=await api('/api/v1/preflight');$('#preflight-result').innerHTML=`<article class="card"><h3>Readiness review · ${r.blocking} blockers</h3>${r.checks.map(c=>`<div class="attention-item">${badge(c.status,c.status)} <strong>${esc(c.name)}</strong>${esc(typeof c.detail==='string'?c.detail:JSON.stringify(c.detail))}</div>`).join('')}</article>`;}catch(e){toast(e.message);}}).catch(e=>toast(e.message)));
+$('#oci-health').addEventListener('click',()=>withFeedback($('#oci-health'),'Querying OCI…',async()=>{const b=$('#oci-health');b.disabled=true;$('#oci-result').textContent='Querying OCI instance and agent state…';try{const data=await api('/api/v1/nodes');$('#oci-result').innerHTML=`<details open><summary>OCI health evidence</summary><pre>${esc(JSON.stringify(data,null,2))}</pre></details>`;}catch(e){$('#oci-result').textContent=e.message;}finally{b.disabled=false;}}).catch(e=>toast(e.message)));
+$('#load-events').addEventListener('click',()=>withFeedback($('#load-events'),'Loading events…',async()=>{try{const r=await api('/api/v1/operations/events');$('#events').innerHTML=r.items.length?r.items.map(x=>`<article><strong>${esc(x.reason)} · ${esc(x.object)}</strong><small>${esc(x.namespace)} · ${esc(x.time)} · ${esc(x.count||1)} occurrences</small><p>${esc(x.message)}</p></article>`).join(''):'<p class="empty">No relevant warning events returned.</p>';}catch(e){toast(e.message);}}).catch(e=>toast(e.message)));
+$('#confirm-form').addEventListener('submit',async e=>{
+  e.preventDefault();if(submitting||!pending||$('#confirm-form button[type=submit]').disabled)return;
+  const confirmation=$('#confirm-input').value;if(confirmation!==confirmationPhrase(pending.action)){$('#confirm-error').textContent='Enter the exact confirmation shown above.';return;}
+  const p=pending;submitting=true;$('#cancel-confirm').disabled=true;$('#confirm-error').textContent='Submitting request…';
+  try{await withFeedback($('#confirm-form button[type=submit]'),'Submitting…',async()=>{
+    const endpoint=p.action==='node_diagnostic'?'/api/v1/diagnostics/runs':'/api/v1/jobs';const body=p.action==='node_diagnostic'?{confirmation,...p.payload}:{action:p.action,confirmation,...p.payload};
+    const job=await api(endpoint,{method:'POST',body:JSON.stringify(body)});
+    jobsEpoch++;jobs=[job,...jobs.filter(j=>j.id!==job.id)];renderJobs();$('#confirm-dialog').close();pending=null;
+    clearTimeout(pollTimer);pollTimer=setTimeout(poll,500);toast('Operation accepted. Progress is shown above.');
+  });}catch(err){$('#confirm-error').textContent=err.message+' If submission was interrupted, refresh Operations before retrying.';}
+  finally{submitting=false;$('#cancel-confirm').disabled=false;}
+});
+$('#confirm-dialog').addEventListener('cancel',e=>{if(submitting)e.preventDefault();else pending=null;});
+$('#cancel-confirm').addEventListener('click',()=>{$('#confirm-dialog').close();pending=null;});$('#close-node').addEventListener('click',()=>$('#node-dialog').close());$('#run-diagnostic').addEventListener('click',()=>confirm('node_diagnostic',{node_name:inspectedNode,profile:$('#diagnostic-profile').value}));$('#diagnostic-profile').addEventListener('change',profileDescription);$('#node-filter').addEventListener('input',renderNodes);$('#job-filter').addEventListener('change',renderJobs);$('#show-history').addEventListener('change',renderJobs);
+document.addEventListener('click',e=>{const action=e.target.closest('[data-action]');if(action){let payload={};if(action.dataset.action==='rdma_validation'){payload={server_node:$('#server-node').value,client_node:$('#client-node').value,performance_profile:$('#performance-profile').value};if(Boolean(payload.server_node)!==Boolean(payload.client_node)){toast('Choose both workers, or leave both automatic.');return;}if(payload.server_node&&payload.server_node===payload.client_node){toast('Choose two different workers.');return;}}confirm(action.dataset.action,payload);}const d=e.target.closest('.download');if(d)withFeedback(d,'Preparing download…',()=>download(d.dataset.url,d.dataset.name)).catch(err=>toast(err.message));const n=e.target.closest('.inspect-node');if(n)inspectNode(n.dataset.node,n.dataset.profile).catch(err=>toast(err.message));const a=e.target.closest('a[href^="#"]');if(a){const target=document.querySelector(a.getAttribute('href'));if(target?.tagName==='DETAILS')target.open=true;if(a.hash===location.hash)routeWorkspace();}});
 
-async function login() {
-  const candidate = $('#token').value.trim();
-  $('#login-error').textContent = '';
-  if (!candidate) { $('#login-error').textContent = 'Enter the workspace token.'; return; }
-  token = candidate;
-  try {
-    await api('/api/v1/session', {method: 'POST'});
-    $('#login').hidden = true;
-    $('#app').hidden = false;
-    $('#token').value = '';
-    await refreshEnvironment();
-    await refreshJobs();
-  } catch (error) {
-    token = '';
-    $('#login-error').textContent = error.message;
-  }
+function renderMeasurement(){
+  if(!env)return;
+  const status=env.measurement_status||{},m=status.measurement,attempt=status.latest_attempt;
+  $('#metric-bw').textContent=m?Number(m.average_gbps).toFixed(2)+' Gb/s':'—';
+  $('#metric-bw-detail').textContent=m?`${m.freshness==='current'?'Current pair':'Historical / partial'} · ${time(m.measured_at)}`:'No measurement after the latest reset';
+  $('#metric-latency').textContent=m?.latency?Number(m.latency.average_us).toFixed(2)+' µs':'—';
+  $('#metric-latency-detail').textContent=m?.latency?`Same run · half RTT · ${time(m.latency.measured_at||m.measured_at)}`:'Not measured in the displayed run';
+  $('#measurement-summary').innerHTML=`<div class="card-heading"><h2>Validation evidence</h2>${badge(status.validation_current?'Current pair measurement':m?'Review measurement':'Not yet measured',status.validation_current?'good':'')}</div>${m?`<p><strong>${esc(m.nodes.join(' → '))}</strong> · ${esc(time(m.measured_at))}</p><p class="muted">${esc(m.scope)}</p>${m.reasons.length?'<ul>'+m.reasons.map(x=>`<li>${esc(x)}</li>`).join('')+'</ul>':''}`:'<p>No measured result is available for this setup. Complete setup and run bandwidth and latency validation.</p>'}${attempt?`<p class="muted">Latest attempt: ${esc(stateLabel(attempt.state))} · ${esc(time(attempt.requested_at))}${m&&attempt.id!==m.job_id?' · separate from the metrics above':''}</p>`:''}<div class="action-row"><a class="jump" href="#step-validate">${status.validation_current?'Run another pair test':'Run current validation'} →</a><a href="#activity">View operation history</a></div>`;
+}
+function renderOnboarding(){
+  if(!env)return;
+  const members=new Set(capacity?.pool_members||[]), selected=env.nodes.filter(n=>n.mode==='dranet'||members.has(n.name));
+  const rows=selected.map(n=>{
+    const stages=[['Kubernetes',n.ready&&!n.cordoned],['Dranet',Boolean(n.dranet_ready??env.driver_ready)&&n.devices.some(d=>d.valid!==false)],['Host evidence',!n.host_issues.length]];
+    const complete=stages.every(x=>x[1])&&!n.issues.length;
+    return `<div class="onboarding-row"><strong>${esc(n.name)}</strong><div class="onboarding-stages">${stages.map(([label,ok])=>`<span class="${ok?'done':''}">${ok?'✓':'○'} ${esc(label)}</span>`).join('')}</div>${badge(complete?'RDMA ready':'Needs readiness checks',complete?'good':'')}<a href="${n.ready?'#step-hosts':'#fleet'}">${n.ready?'Review host evidence':'Await Kubernetes Ready'}</a></div>`;
+  });
+  const instances=new Set(selected.map(n=>n.instance_id).filter(Boolean));
+  const addresses=new Set(selected.map(n=>n.name));
+  for(const n of capacity?.workers||[]){if(!instances.has(n.instance_id)&&!addresses.has(n.address))rows.push(`<div class="onboarding-row"><strong>${esc(n.address||n.instance_id||'New worker')}</strong>${badge(n.lifecycle_state)}<span>Kubernetes registration pending · Dranet and host checks follow</span></div>`);}
+  $('#worker-onboarding').innerHTML=rows.join('')||'<p class="muted">No workers have been discovered yet.</p>';
+}
+$('#capacity-stack-id').addEventListener('input',()=>{connectionDirty=true;$('#stack-id-error').textContent='';});
+$('#capacity-connect-confirm').addEventListener('input',()=>{$('#stack-confirm-error').textContent='';});
+$('#capacity-target').addEventListener('input',()=>{capacityCheck=null;$('#capacity-readiness-result').innerHTML='<p class="muted">Target changed. Check scaling prerequisites again.</p>';renderCapacity();});
+$('#capacity-readiness').addEventListener('click',()=>withFeedback($('#capacity-readiness'),'Checking prerequisites…',async()=>{
+  const target=Number($('#capacity-target').value),button=$('#capacity-readiness');
+  if(!Number.isInteger(target)||target<0||target>64){toast('Choose a whole node count between 0 and 64.');return;}
+  button.disabled=true;$('#capacity-readiness-result').textContent='Checking OCI capacity availability, stack ownership, pool settings and worker readiness…';
+  try{const result=await api('/api/v1/capacity/readiness?target='+target);if(target!==Number($('#capacity-target').value))return;capacityCheck=result;
+    $('#capacity-readiness-result').innerHTML=`<article class="card"><div class="card-heading"><h3>Scaling prerequisite review</h3>${badge(result.can_plan?'Ready to generate plan':'Action needed',result.can_plan?'good':'warn')}</div><small>Checked ${esc(time(result.checked_at))}. Refreshed before each operation; this review expires after five minutes.</small>${result.capacity_report?`<p>Shape: ${esc(result.capacity_report.shape||'Unknown')} · Region: ${esc(result.capacity_report.region)} · Checked ${esc(time(result.capacity_report.checked_at))}</p>`:''}${result.checks.map(c=>`<div class="readiness-row">${badge(c.status==='unverified'?'Not yet verified':c.status,c.status)}<div><strong>${esc(c.name)}</strong><p>${esc(c.detail)}</p>${c.next_action?`<p class="muted">Next: ${esc(c.next_action)}</p>`:''}</div></div>`).join('')}</article>`;
+  }catch(error){capacityCheck=null;$('#capacity-readiness-result').textContent=error.message;}finally{renderCapacity();}
+}).catch(e=>toast(e.message)));
+
+function renderRecovery(){
+  renderReplacement();
+  const area=$('#recovery-detail');if(!area)return;
+  const assessment=jobs.find(j=>['recovery_assess','recovery_restart_assess'].includes(j.action)&&j.payload?.node_name===inspectedNode&&j.result)?.result;
+  const record=env?.recoveries?.find(r=>r.node_name===inspectedNode);
+  area.innerHTML=record?`<p class="error">Recorded recovery: ${esc(record.phase)}. ${esc(record.error||'')}</p><button id="finish-recovery">Finish recorded recovery</button>`:assessment?`<p>${assessment.eligible?'Eligible for reviewed OCA restart':'Assessment completed; restart blocked or not applicable'}</p>${(assessment.blockers||[]).map(b=>`<p class="error">${esc(b)}</p>`).join('')}<p>${esc(assessment.restart_requirements||'')}</p><pre>${esc(JSON.stringify(assessment.probe,null,2))}</pre><p>${esc(assessment.action)}</p><p>${esc(assessment.protection)}</p>${assessment.eligible?'<button id="run-recovery">Review Oracle Cloud Agent restart</button>':''}`:'<p>Run assessment to collect current evidence. A preview expires after five minutes.</p>';
+  $('#assess-recovery').disabled=busy||Boolean(replacementPending())||Boolean(record)||Boolean(capacityPending())||env?.mode!=='live';
+  $('#assess-agent-restart').disabled=$('#assess-recovery').disabled;
+  const run=$('#run-recovery');if(run){run.disabled=busy;run.onclick=()=>confirm('recovery_run',{recovery_preview_id:assessment.preview_id});}
+  const finish=$('#finish-recovery');if(finish){finish.disabled=busy;finish.onclick=()=>confirm('recovery_finish',{recovery_attempt_id:record.id});}
+}
+$('#assess-agent-restart').addEventListener('click',()=>confirm('recovery_restart_assess',{node_name:inspectedNode}));
+$('#assess-recovery').addEventListener('click',()=>confirm('recovery_assess',{node_name:inspectedNode}));
+
+function renderPerformance(){
+  const target=$('#pair-performance');if(!target)return;
+  const rows=env?.performance?.pairs||[];
+  const names=[...new Set(rows.map(r=>r.server))];
+  target.innerHTML=rows.length?`<section class="performance-panel" aria-labelledby="matrix-heading"><header class="performance-panel-heading"><h4 id="matrix-heading">Directional bandwidth / latency matrix</h4><p>Bandwidth and mean latency for each measured direction.</p></header><div class="table-wrap" tabindex="0" role="region" aria-label="Directional bandwidth and latency matrix"><table><tr><th>From / to</th>${names.map(n=>`<th>${esc(n)}</th>`).join('')}</tr>${names.map(a=>`<tr><th>${esc(a)}</th>${names.map(b=>{const p=rows.find(r=>r.server===a&&r.client===b);return `<td>${a===b?'—':p?.average_gbps==null?'Not measured':`${Number(p.average_gbps).toFixed(1)} Gbit/s<br>${Number(p.average_us).toFixed(2)} µs<br>${esc(p.state)}`}</td>`;}).join('')}</tr>`).join('')}</table></div></section><section class="performance-panel" aria-labelledby="baseline-heading"><header class="performance-panel-heading"><h4 id="baseline-heading">Measurements and baseline comparison</h4><p>Detailed results, measurement time and changes against a comparable baseline.</p></header><div class="table-wrap" tabindex="0" role="region" aria-label="Measurements and baseline comparison"><table><thead><tr><th>Direction</th><th>Evidence</th><th>Gbit/s</th><th>Mean / p99 µs</th><th>Baseline change</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.server)} → ${esc(r.client)}</td><td>${esc(r.state.replaceAll('_',' '))}<small>${esc(time(r.measured_at))} · ${esc(r.profile||'—')}</small></td><td>${r.average_gbps==null?'—':Number(r.average_gbps).toFixed(2)}</td><td>${r.average_us==null?'—':Number(r.average_us).toFixed(2)} / ${r.p99_us==null?'—':Number(r.p99_us).toFixed(2)}</td><td>${r.baseline?`Bandwidth ${Number(r.baseline.bandwidth_change_percent).toFixed(1)}%; latency ${Number(r.baseline.latency_change_percent).toFixed(1)}%<small>Baseline ${esc(time(r.baseline.measured_at))}; earliest comparable retained run</small>`:r.reference?`${esc(r.reference.warning)} Bandwidth ${Number(r.reference.bandwidth_change_percent).toFixed(1)}%; latency ${Number(r.reference.latency_change_percent).toFixed(1)}%<details><summary>Compare test conditions</summary><pre>${esc(JSON.stringify({before:r.reference.before,after:r.reference.after},null,2))}</pre></details>`:esc(r.baseline_note||'Not measured')}</td></tr>`).join('')}</tbody></table></div></section><p class="muted performance-note">${esc(env.performance.scope)} Comparisons match observed versions and settings; scheduler-managed CPU placement can add variability.</p>`:'<p class="muted">Two workers are required to build pair history.</p>';
 }
 
-$('#login-button').addEventListener('click', login);
-$('#token').addEventListener('keydown', event => { if (event.key === 'Enter') login(); });
-$('#refresh').addEventListener('click', async () => { try { await refreshEnvironment(); toast('Environment refreshed'); } catch (error) { toast(error.message); } });
-$('#run-preflight').addEventListener('click', refreshPreflight);
-$('#refresh-nodes').addEventListener('click', refreshNodeDiagnostics);
-$('#download-node-report').addEventListener('click', downloadNodeReport);
-$('#discover-hardware').addEventListener('click', discoverHardware);
-$('#rdma-config-form').addEventListener('submit', saveRdmaConfig);
-$('#rdma-pf').addEventListener('change', () => {
-  const candidate = (discovery?.common_candidates || []).find(item => item.name === $('#rdma-pf').value);
-  if (candidate?.eligible && candidate?.mtu) $('#rdma-mtu').value = candidate.mtu;
-});
-$('#run-validation').addEventListener('click', () => queue('rdma_validation').catch(error => toast(error.message)));
-$$('.nav').forEach(button => button.addEventListener('click', () => setPage(button.dataset.page)));
+function replacementPending(){const r=env?.replacement;return r&&!['COMPLETE','CLOSED'].includes(r.phase)?r:null;}
+function renderReplacement(){
+  const op=env?.replacement,pendingOp=replacementPending(),area=$('#replacement-operation');
+  if(area)area.innerHTML=op?`<article class="card"><h3>Worker replacement · ${esc(op.phase)}</h3><p>${esc(op.node_name)} → ${esc(op.new_node_name||'waiting for replacement')}</p><p>Selected instance: ${esc(op.instance_id)} · Intended pool size: ${esc(op.size)}</p><p>${esc(op.error||op.outcome||'')}</p><p>${esc(op.hardware_comparison?.message||'')}</p><p>OKE request: ${esc(op.work_request_id||'Not recorded')} · ${esc(op.work_status||op.submission)}</p><details><summary>Replacement evidence and timeline</summary><pre>${esc(JSON.stringify(op,null,2))}</pre></details>${pendingOp?'<button id="resume-replacement">Resume / verify replacement</button> <button id="close-replacement" class="secondary">Close for manual review</button>':''}</article>`:'';
+  for(const [id,action] of [['resume-replacement','replacement_resume'],['close-replacement','replacement_close']]){const b=$('#'+id);if(b){b.disabled=busy;b.onclick=()=>confirm(action,{replacement_id:op.id});}}
+  const preview=jobs.find(j=>j.action==='replacement_preview'&&j.payload?.node_name===inspectedNode&&j.result)?.result;
+  const panel=$('#replacement-preview');if(panel)panel.innerHTML=preview?`<p>${esc(preview.impact)}</p><p>${esc(preview.protection)}</p><p>Exact instance: ${esc(preview.instance_id)} · Pinned image: ${esc(preview.fingerprint?.image)} · Pool size: ${esc(preview.size)}</p>${(preview.blockers||[]).map(x=>`<p class="error">${esc(x)}</p>`).join('')}${preview.eligible&&!pendingOp?'<button id="run-replacement">Review replacement</button>':''}`:'';
+  const b=$('#preview-replacement');if(b)b.disabled=busy||Boolean(pendingOp)||Boolean(capacityPending())||Boolean(env?.recoveries?.length)||env?.mode!=='live';
+  const run=$('#run-replacement');if(run){run.disabled=busy||Date.now()/1000-preview.created_at>300;run.onclick=()=>confirm('replacement_run',{replacement_id:preview.id});}
+}
+$('#preview-replacement').addEventListener('click',()=>confirm('replacement_preview',{node_name:inspectedNode}));
